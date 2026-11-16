@@ -31,6 +31,7 @@ const sections = [_]Section{
     .{ .title = "Shortcuts", .icon = .keyboard, .build = shortcutsPage },
     .{ .title = "Notifications", .icon = .bell, .build = notificationsPage },
     .{ .title = "Remote Hosts", .icon = .add_host, .build = hostsPage },
+    .{ .title = "Developer", .icon = .gear, .build = developerPage },
 };
 
 /// One open Settings window. Everything its rows point at is in `arena` or in here, and both
@@ -1206,6 +1207,19 @@ fn notificationsPage(ctx: *Ctx) *gtk.Widget {
     statusSwitch(ctx, which, .done, "Done", "A program finished", &st.alert_done);
     const sys = group(p, "Terminal Notifications");
     switchRow(ctx, sys, "Notifications from programs", "Programs can send notifications with OSC 9 or OSC 777", &st.terminal_notifications, null);
+    return p.as(gtk.Widget);
+}
+
+// Developer.
+
+fn developerPage(ctx: *Ctx) *gtk.Widget {
+    const p = page();
+    const st = &settings.current;
+    const views = group(p, "Views");
+    switchRow(ctx, views, "Agent board", "Programs sorted into Idle, Running, Attention and Done", &st.agent_board, App.viewsChanged);
+    switchRow(ctx, views, "Overview", "Every tab at once, in a grid", &st.overview, App.viewsChanged);
+    const experiments = group(p, "Experiments");
+    switchRow(ctx, experiments, "Smooth scrolling in full-screen programs", "Text glides between the steps a program such as pi or Neovim scrolls by", &st.program_scroll_glide, App.redrawAllPub);
     return p.as(gtk.Widget);
 }
 

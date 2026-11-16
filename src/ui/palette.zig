@@ -8,6 +8,7 @@ const gtk = @import("gtk");
 const adw = @import("adw");
 const Server = @import("../rex/server.zig").Server;
 const filterdialog = @import("filterdialog.zig");
+const settings = @import("../settings/settings.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -29,6 +30,13 @@ const local = [_]struct { title: [:0]const u8, action: [:0]const u8, words: []co
     .{ .title = "Tight layout", .action = "app.tight", .words = "compact tmux relaxed" },
     .{ .title = "Settings", .action = "app.settings", .words = "preferences font" },
 };
+
+fn switchedOff(action: []const u8) bool {
+    const st = &settings.current;
+    const eql = std.mem.eql;
+    if (!st.overview and (eql(u8, action, "app.overview") or eql(u8, action, "client.overview.toggle"))) return true;
+    return !st.agent_board and eql(u8, action, "client.board.toggle");
+}
 
 const Item = struct {
     row: *gtk.ListBoxRow,
@@ -86,8 +94,8 @@ pub const Palette = struct {
 
         // An action without a title is a call a program makes, such as reading a terminal's
         // screen, not a command for a person to run; those stay out of the list.
-        for (server.actions) |a| if (!std.mem.eql(u8, a.title, a.name)) p.add(a.title, a.category, a.keys, a.keywords, a.name, true, null);
-        for (local, 0..) |l, i| p.add(l.title, "Renux", "", l.words, l.action, false, i);
+        for (server.actions) |a| if (!std.mem.eql(u8, a.title, a.name) and !switchedOff(a.name)) p.add(a.title, a.category, a.keys, a.keywords, a.name, true, null);
+        for (local, 0..) |l, i| if (!switchedOff(l.action)) p.add(l.title, "Renux", "", l.words, l.action, false, i);
 
         p.filter("");
         p.dialog.present(parent);

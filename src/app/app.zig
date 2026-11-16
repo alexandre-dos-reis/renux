@@ -364,6 +364,7 @@ pub const App = struct {
     /// Every tab at once, small, over the panes while it is open.
     overview: *@import("../ui/overview.zig").Overview = undefined,
     board_button: *gtk.ToggleButton = undefined,
+    overview_button: *gtk.Widget = undefined,
     eye_button: *gtk.ToggleButton = undefined,
     /// Runs while the sidebar fades out, before it changes between every tab and agents only.
     eye_swap: c_uint = 0,
@@ -569,7 +570,10 @@ pub const App = struct {
         spacer.as(gtk.Widget).setHexpand(1);
         footer.append(spacer.as(gtk.Widget));
         footer.append(a.board_button.as(gtk.Widget));
-        footer.append(icons.button(.overview, "Overview of every tab", "app.overview").as(gtk.Widget));
+        a.overview_button = icons.button(.overview, "Overview of every tab", "app.overview").as(gtk.Widget);
+        footer.append(a.overview_button);
+        a.board_button.as(gtk.Widget).setVisible(@intFromBool(settings.current.agent_board));
+        a.overview_button.setVisible(@intFromBool(settings.current.overview));
         a.foot_session = icons.button(.new_session, "New session", "app.new-session").as(gtk.Widget);
         footer.append(a.foot_session);
         a.foot_host = icons.button(.add_host, "Add remote host", "app.add-host").as(gtk.Widget);
@@ -883,6 +887,7 @@ pub const App = struct {
             a.terminalChanged();
             a.tabsChanged();
             a.headersChanged();
+            a.viewsChanged();
             a.applyLook();
             a.setTight(settings.current.tight);
             a.redrawAll();
@@ -899,6 +904,7 @@ pub const App = struct {
 
     /// Shows the agent board over the panes, or goes back to them.
     pub fn showBoard(a: *App, on: bool) void {
+        if (on and !settings.current.agent_board) return;
         // The board and going to a pane both leave the overview.
         a.overview.hideNow();
         if (on == a.board.shown()) return;
@@ -4228,7 +4234,16 @@ pub const App = struct {
     }
 
     fn toggleOverview(a: *App) void {
+        if (!settings.current.overview and !a.overview.shown()) return;
         a.overview.toggle();
+    }
+
+    pub fn viewsChanged(a: *App) void {
+        const st = &settings.current;
+        a.board_button.as(gtk.Widget).setVisible(@intFromBool(st.agent_board));
+        a.overview_button.setVisible(@intFromBool(st.overview));
+        if (!st.agent_board and a.board.shown()) a.showBoard(false);
+        if (!st.overview) a.overview.hideNow();
     }
 
     /// The tab the window shows now.
@@ -4927,6 +4942,25 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
             tv.showMenuAt(120, 120);
         } else if (std.mem.eql(u8, cmd, "zoom")) {
             tv.zoomBy(std.fmt.parseFloat(f64, it.next() orelse "0") catch 0);
+        } else if (std.mem.eql(u8, cmd, "wheel")) {
+            tv.wheelBy(std.fmt.parseFloat(f64, rest) catch 1);
+        } else if (std.mem.eql(u8, cmd, "coast")) {
+            tv.coastBy(std.fmt.parseFloat(f64, rest) catch 0);
+        } else if (std.mem.eql(u8, cmd, "glide-ease")) {
+            _ = tv.glide.ease((std.fmt.parseFloat(f64, rest) catch 16) / 1000, tv.cell_h);
+        } else if (std.mem.eql(u8, cmd, "pane-shot")) {
+            const scale: f32 = @floatCast(termview.shotScale() orelse 1);
+            const node = tv.picture(scale) orelse continue;
+            defer node.unref();
+            const renderer = a.window.as(gtk.Native).getRenderer() orelse continue;
+            const z = gpa.dupeSentinel(u8, rest, 0) catch continue;
+            defer gpa.free(z);
+            const pane = tv.widget();
+            var whole: @import("graphene").Rect = .{ .f_origin = .{ .f_x = 0, .f_y = 0 }, .f_size = .{ .f_width = @ceil(@as(f32, @floatFromInt(pane.getWidth())) * scale), .f_height = @ceil(@as(f32, @floatFromInt(pane.getHeight())) * scale) } };
+            const texture = renderer.renderTexture(node, &whole);
+            defer texture.as(gobject.Object).unref();
+            _ = texture.saveToPng(z.ptr);
+            std.log.info("pane-shot: glide at {d:.2} of a {d:.0} row", .{ tv.glide.offset, tv.cell_h });
         } else if (std.mem.eql(u8, cmd, "scroll")) {
             const dy = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
             tv.scrollBy(dy);
