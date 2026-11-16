@@ -24,6 +24,7 @@ const theme = @import("../theme/theme.zig");
 const icons = @import("../icons/icons.zig");
 const keys = @import("../terminal/keys.zig");
 const Palette = @import("../ui/palette.zig").Palette;
+const reorder = @import("../ui/reorder.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -69,6 +70,7 @@ const css =
     \\.board-card { background-color: mix(@view_bg_color, @window_fg_color, 0.05); border-radius: 10px; padding: 10px 12px; font-weight: 400; box-shadow: inset 0 0 0 1px @renux_stroke_subtle, 0 1px 4px alpha(black, 0.12); transition: background-color 140ms ease-out, box-shadow 140ms ease-out; }
     \\.board-card:hover { background-color: mix(@view_bg_color, @window_fg_color, 0.09); box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.22), 0 3px 10px alpha(black, 0.2); }
     \\.board-card.attention { box-shadow: inset 0 0 0 1px alpha(@warning_color, 0.6), 0 1px 4px alpha(black, 0.12); }
+    \\.board-card:focus-visible { outline: 2px solid alpha(@accent_bg_color, 0.85); outline-offset: -2px; }
     \\.board-card-title { font-weight: 600; }
     \\.board-card-message { color: @renux_secondary; font-size: 0.92em; }
     \\.board-card-meta { color: @renux_secondary; font-size: 0.82em; }
@@ -79,9 +81,21 @@ const css =
     \\.divider-line.shown { opacity: 1; transition: opacity 90ms ease-out 60ms; }
     \\.drop-target { background-color: alpha(@accent_bg_color, 0.16); border: 1.5px solid alpha(@accent_bg_color, 0.8); border-radius: 9px; color: @accent_color; }
     \\.renux-sidebar headerbar { background: none; box-shadow: none; min-height: 52px; padding: 0 6px; }
-    \\.renux-sidebar list { background: none; padding: 2px 8px 8px 8px; }
+    \\.renux-sidebar list { background: none; padding: 2px 0 8px 8px; }
+    \\window.sidebar-end .renux-sidebar list { padding: 2px 8px 8px 0; }
+    \\window.tight .renux-sidebar list { padding: 2px 8px 8px 8px; }
     \\.renux-sidebar list > row { border-radius: 8px; min-height: 30px; padding: 0 5px 0 8px; margin: 0 0 3px 0; }
-    \\.renux-sidebar list > row:selected { background-color: alpha(@window_fg_color, 0.09); }
+    \\.renux-sidebar list > row:selected { background-color: alpha(@window_fg_color, 0.09); box-shadow: 0 1px 3px alpha(black, 0.14); }
+    \\.renux-sidebar list > row { transition: transform 220ms cubic-bezier(0.2, 0.9, 0.3, 1), background-color 120ms ease-out; }
+    \\.renux-sidebar list > row.drag-source { opacity: 0; }
+    \\scrollbar { opacity: 0; }
+    \\.renux-sidebar list > row:focus-visible { outline: 2px solid alpha(@accent_bg_color, 0.85); outline-offset: -2px; background-color: alpha(@window_fg_color, 0.06); }
+    \\.renux-sidebar list { transition: opacity 170ms ease-out, transform 220ms cubic-bezier(0.2, 0.9, 0.3, 1); }
+    \\.renux-sidebar list.swapping { opacity: 0; transform: translateY(6px); transition: opacity 110ms ease-in, transform 110ms ease-in; }
+    \\.session-ghost { border-radius: 10px; background-color: mix(@renux_shell, @window_fg_color, 0.07); box-shadow: 0 0 0 1px @renux_stroke_subtle, 0 8px 22px alpha(black, 0.28); animation: ghost-lift 150ms ease-out; transition: box-shadow 170ms ease-out; }
+    \\.session-ghost.landing { box-shadow: 0 0 0 1px @renux_stroke_subtle, 0 1px 3px alpha(black, 0.1); }
+    \\@keyframes ghost-lift { from { background-color: alpha(@renux_shell, 0); box-shadow: 0 0 0 1px alpha(black, 0), 0 0 0 alpha(black, 0); } }
+    \\window.tight .renux-sidebar list > row:selected { box-shadow: none; }
     \\.renux-sidebar list > row:hover:not(:selected):not(.session-row):not(.host-row) { background-color: alpha(@window_fg_color, 0.04); }
     \\.renux-sidebar .row-title { font-size: 0.95em; }
     \\.row-more { opacity: 0; }
@@ -103,13 +117,14 @@ const css =
     \\.filter-pill.filtered { background-color: alpha(@accent_bg_color, 0.16); color: @accent_color; box-shadow: inset 0 0 0 1px alpha(@accent_bg_color, 0.35); }
     \\.filter-pill.filtered:hover { background-color: alpha(@accent_bg_color, 0.24); }
     \\.window-card.alone { margin-left: 8px; }
-    \\.content .workspace { margin: 6px 8px 8px 0; }
-    \\.content.alone .workspace { margin: 6px 8px 8px 8px; }
+    \\.content .workspace { margin: 8px; }
+    \\.content.alone .workspace { margin: 8px; }
     \\window.no-headers .content.alone .workspace { margin-top: 52px; }
     \\window.tight .content.alone .workspace { margin: 0; }
     \\.window-corner { min-height: 52px; padding: 0 6px 0 12px; }
-    \\.pane-card { background-color: @view_bg_color; border-radius: 11px; border: 1px solid @renux_stroke_subtle; }
-    \\.pane-card.focused { border-color: alpha(@accent_bg_color, 0.85); box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.35); }
+    \\.pane-card { background-color: @view_bg_color; border-radius: 11px; border: 1px solid @renux_stroke_subtle; box-shadow: 0 0 8px alpha(black, 0.16); }
+    \\.pane-card.joined { box-shadow: none; }
+    \\.pane-card.focused { border-color: alpha(@accent_bg_color, 0.85); box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.35), 0 0 8px alpha(black, 0.16); }
     \\.pane-card.floating { box-shadow: 0 8px 28px alpha(black, 0.45); }
     \\.pane-card.floating.focused { box-shadow: 0 0 0 1px alpha(@accent_bg_color, 0.35), 0 8px 28px alpha(black, 0.45); }
     \\.layer-card { background-color: @renux_stroke_subtle; border: 1px solid @renux_stroke_subtle; border-radius: 11px; box-shadow: 0 8px 28px alpha(black, 0.45); }
@@ -177,8 +192,7 @@ const css =
     \\window.tabs-above .renux-sidebar list > row.session-pick { min-height: 28px; margin-top: 2px; border-radius: 8px; }
     \\window.tabs-above .renux-sidebar list > row.session-pick:selected { background-color: alpha(@window_fg_color, 0.09); }
     \\window.tabs-above .renux-sidebar row.session-pick .session-heading { font-size: 0.95em; color: @window_fg_color; }
-    \\window.sidebar-end .content .workspace { margin: 6px 0 8px 8px; }
-    \\window.sidebar-end .content.alone .workspace { margin: 6px 8px 8px 8px; }
+    \\window.tight.sidebar-end .content .workspace { margin: 0; }
     \\.goto { padding: 12px; }
     \\.goto-detail { font-size: 0.85em; color: @renux_secondary; }
     \\.goto-path { font-family: monospace; font-size: 0.9em; color: @renux_secondary; margin: 0 4px; }
@@ -296,6 +310,17 @@ pub const App = struct {
     toast_text: std.ArrayList(u8) = .empty,
     toast_count: u32 = 0,
     sidebar: *gtk.ListBox = undefined,
+    /// Over the sidebar's list, for the picture of a session being dragged to another place.
+    sidebar_layer: *gtk.Fixed = undefined,
+    sidebar_scroller: *gtk.ScrolledWindow = undefined,
+    /// A press on a session's heading that may become a drag: where it took hold, and whether
+    /// it has moved far enough to be one.
+    session_grab_y: f64 = 0,
+    session_dragging: bool = false,
+    session_drag_refused: bool = false,
+    /// The sessions being reordered, top to bottom, and their host.
+    drag_host: ?HostRef = null,
+    drag_ids: std.ArrayList([]u8) = .empty,
     split: *adw.OverlaySplitView = undefined,
     card: *gtk.Widget = undefined,
     /// The window's see-through background, one even layer under everything, panes included.
@@ -340,6 +365,10 @@ pub const App = struct {
     overview: *@import("../ui/overview.zig").Overview = undefined,
     board_button: *gtk.ToggleButton = undefined,
     eye_button: *gtk.ToggleButton = undefined,
+    /// Runs while the sidebar fades out, before it changes between every tab and agents only.
+    eye_swap: c_uint = 0,
+    /// The sidebar was hidden when the keyboard was sent to it, and hides again after.
+    sidebar_peek: bool = false,
     eye_dot: *gtk.Widget = undefined,
     /// The sidebar lists only agents, each with its status.
     agents_only: bool = false,
@@ -448,9 +477,17 @@ pub const App = struct {
         a.sidebar.as(gtk.Widget).addCssClass("navigation-sidebar");
         _ = gtk.ListBox.signals.row_activated.connect(a.sidebar, *App, &rowActivated, a, .{});
         const scroller = gtk.ScrolledWindow.new();
-        scroller.setPolicy(.never, .automatic);
+        scroller.setPolicy(.never, .external);
         scroller.setChild(a.sidebar.as(gtk.Widget));
         scroller.as(gtk.Widget).setVexpand(1);
+        a.sidebar_scroller = scroller;
+        a.sidebar_layer = gtk.Fixed.new();
+        a.sidebar_layer.as(gtk.Widget).setCanTarget(0);
+        a.sidebar_layer.as(gtk.Widget).setOverflow(.hidden);
+        const side_stack = gtk.Overlay.new();
+        side_stack.setChild(scroller.as(gtk.Widget));
+        side_stack.addOverlay(a.sidebar_layer.as(gtk.Widget));
+        side_stack.as(gtk.Widget).setVexpand(1);
         // The window controls and the sidebar toggle sit in a fixed corner above everything, so the
         // toggle never moves; the sidebar header leaves room for it, and so does the top-left pane
         // while the sidebar is hidden.
@@ -545,7 +582,7 @@ pub const App = struct {
         side.as(gtk.Widget).addCssClass("renux-sidebar");
         side.addTopBar(side_header.as(gtk.Widget));
         side.addBottomBar(footer.as(gtk.Widget));
-        side.setContent(scroller.as(gtk.Widget));
+        side.setContent(side_stack.as(gtk.Widget));
 
         // Content: the panes, each its own card, on the window's background. While the sidebar is
         // hidden, the top-left pane's title makes room for the corner.
@@ -879,12 +916,119 @@ pub const App = struct {
         a.eye_button.setActive(@intFromBool(a.eye_button.getActive() == 0));
     }
 
-    fn eyeToggled(button: *gtk.ToggleButton, a: *App) callconv(.c) void {
-        a.agents_only = button.getActive() != 0;
+    /// The eye was clicked: the sidebar fades out, changes between every tab and agents only
+    /// while it is clear, and fades back in with the new rows.
+    fn eyeToggled(_: *gtk.ToggleButton, a: *App) callconv(.c) void {
+        a.sidebar.as(gtk.Widget).addCssClass("swapping");
+        if (a.eye_swap == 0) a.eye_swap = glib.timeoutAdd(120, &eyeSwap, a);
+    }
+
+    fn eyeSwap(data: ?*anyopaque) callconv(.c) c_int {
+        const a: *App = @ptrCast(@alignCast(data.?));
+        a.eye_swap = 0;
+        a.agents_only = a.eye_button.getActive() != 0;
         // "4 min" beside each agent is kept up to date while they are listed.
         if (a.agents_clock != 0) _ = glib.Source.remove(a.agents_clock);
         a.agents_clock = if (a.agents_only) glib.timeoutAddSeconds(30, &agentsTick, a) else 0;
         a.rebuildSidebar();
+        a.refreshNow();
+        a.sidebar.as(gtk.Widget).removeCssClass("swapping");
+        return 0;
+    }
+
+    /// Sends the keyboard to the sidebar, on the row of the tab being shown: j and k (or the
+    /// arrows) step through the rows, Ctrl+D and Ctrl+U jump half a screen, g and G go to the
+    /// ends, Enter opens the row, and Escape goes back to the pane. A hidden sidebar shows
+    /// for as long as this lasts.
+    fn focusSidebar(a: *App) void {
+        if (a.split.getShowSidebar() == 0) {
+            a.sidebar_peek = true;
+            a.split.setShowSidebar(1);
+        }
+        if (a.sidebar_stale) a.refreshNow();
+        var at: ?usize = null;
+        if (a.sidebar.getSelectedRow()) |row| {
+            const i = row.getIndex();
+            if (i >= 0) at = @intCast(i);
+        }
+        const start = at orelse a.pickableFrom(0, 1) orelse return a.leaveSidebar();
+        a.focusSidebarRow(start);
+    }
+
+    fn focusSidebarRow(a: *App, index: usize) void {
+        const row = a.sidebar.getRowAtIndex(@intCast(index)) orelse return;
+        // The ring that marks the row with the keyboard shows only for keyboard focus.
+        a.window.as(gtk.Window).setFocusVisible(1);
+        _ = row.as(gtk.Widget).grabFocus();
+    }
+
+    /// The keyboard goes back to the pane, and a sidebar shown only for this hides again.
+    fn leaveSidebar(a: *App) void {
+        if (a.sidebar_peek) {
+            a.sidebar_peek = false;
+            a.split.setShowSidebar(0);
+        }
+        if (a.workspace) |w| w.grabFocus();
+    }
+
+    /// The first row that opens something, looking from `from` in steps of `step`: headings
+    /// are passed over.
+    fn pickableFrom(a: *App, from: usize, step: isize) ?usize {
+        var i: isize = @intCast(from);
+        while (i >= 0 and i < a.rows.items.len) : (i += step) {
+            if (a.rows.items[@intCast(i)] != null) return @intCast(i);
+        }
+        return null;
+    }
+
+    /// The sidebar row that has the keyboard, if one does.
+    fn sidebarCursor(a: *App) ?usize {
+        const focus = a.window.as(gtk.Window).getFocus() orelse return null;
+        const row = gobject.ext.cast(gtk.ListBoxRow, focus) orelse return null;
+        if (row.as(gtk.Widget).getParent() != a.sidebar.as(gtk.Widget)) return null;
+        const i = row.getIndex();
+        return if (i >= 0) @intCast(i) else null;
+    }
+
+    /// A key while a sidebar row has the keyboard. True when it was one of the sidebar's own.
+    fn sidebarKey(a: *App, keyval: c_uint, mods: u4) bool {
+        const at = a.sidebarCursor() orelse return false;
+        // Half the rows that fit, as Ctrl+D and Ctrl+U move in a pager.
+        const fit = @divTrunc(a.sidebar_scroller.as(gtk.Widget).getHeight(), 33 * 2);
+        const jump: usize = @intCast(@max(3, fit));
+        if (mods == keys.ctrl) switch (keyval) {
+            'd', 'D' => a.moveSidebarCursor(at, jump, 1),
+            'u', 'U' => a.moveSidebarCursor(at, jump, -1),
+            else => return false,
+        } else if (mods & ~@as(u4, keys.shift) != 0) {
+            return false;
+        } else switch (keyval) {
+            'j', 0xff54 => a.moveSidebarCursor(at, 1, 1),
+            'k', 0xff52 => a.moveSidebarCursor(at, 1, -1),
+            'g', 0xff50 => a.moveSidebarCursor(at, a.rows.items.len, -1),
+            'G', 0xff57 => a.moveSidebarCursor(at, a.rows.items.len, 1),
+            0xff0d, 0xff8d, 'l', 0xff53 => {
+                // Opening the row is the list's own doing; the pane then takes the keyboard.
+                if (a.sidebar.getRowAtIndex(@intCast(at))) |row| _ = row.as(gtk.Widget).activate();
+                a.leaveSidebar();
+            },
+            0xff1b, 'q', 'h', 0xff51 => a.leaveSidebar(),
+            else => return false,
+        }
+        return true;
+    }
+
+    /// Moves the keyboard `count` rows that open something up or down from `at`, stopping at
+    /// the last one there is.
+    fn moveSidebarCursor(a: *App, at: usize, count: usize, step: isize) void {
+        var to = at;
+        var left = count;
+        while (left > 0) : (left -= 1) {
+            const from = @as(isize, @intCast(to)) + step;
+            if (from < 0) break;
+            to = a.pickableFrom(@intCast(from), step) orelse break;
+        }
+        if (to != at) a.focusSidebarRow(to);
     }
 
     fn agentsTick(data: ?*anyopaque) callconv(.c) c_int {
@@ -971,50 +1115,75 @@ pub const App = struct {
     }
 
     fn strayKey(ctl: *gtk.EventControllerKey, keyval: c_uint, _: c_uint, state: gdk.ModifierType, a: *App) callconv(.c) c_int {
+        switch (a.routeKey(keyval, keys.modsFromGdk(@bitCast(state)))) {
+            .taken => return 1,
+            .left => return 0,
+            .to_pane => {
+                const pane = ((a.workspace orelse return 0).focusedView() orelse return 0).widget();
+                _ = pane.grabFocus();
+                return ctl.forward(pane);
+            },
+        }
+    }
+
+    /// What becomes of a key the window hears first: taken here, left to whatever has the
+    /// keyboard, or sent to the highlighted pane.
+    const KeyRoute = enum { taken, left, to_pane };
+
+    fn routeKey(a: *App, keyval: c_uint, mods: u4) KeyRoute {
         // The overview is over the panes: arrows move between its tabs, Enter goes to one and
         // Escape goes back. Nothing else is typed into a pane that can't be seen, except Rex's
         // own keys (one that starts a binding, and what follows a prefix), so the key that
         // opened it closes it too.
         if (a.overview.shown()) {
-            const held = keys.modsFromGdk(@bitCast(state));
-            const in_dialog = if (a.window.as(gtk.Root).getFocus()) |f| f.getAncestor(gtk.Popover.getGObjectType()) != null or f.getAncestor(adw.Dialog.getGObjectType()) != null else false;
-            if (!in_dialog) {
+            if (!a.inDialog()) {
                 const chord = termview.chordPending();
-                if (!chord and a.overview.key(keyval, held)) return 1;
-                if (!keys.isModifier(keyval) and !chord and !a.beginsBinding(keyval, held)) return 1;
+                if (!chord and a.overview.key(keyval, mods)) return .taken;
+                if (!keys.isModifier(keyval) and !chord and !a.beginsBinding(keyval, mods)) return .taken;
             }
         }
-        const ws = a.workspace orelse return 0;
-        const tv = ws.focusedView() orelse return 0;
+        const ws = a.workspace orelse return .left;
+        const tv = ws.focusedView() orelse return .left;
         const pane = tv.widget();
-        if (pane.getMapped() == 0) return 0;
-        const focus = a.window.as(gtk.Root).getFocus();
-        if (focus) |f| inline for (.{ gtk.Popover, adw.Dialog }) |T| {
-            if (f.getAncestor(T.getGObjectType()) != null) return 0;
-        };
-        // The board is over the panes: Escape goes back to them, and nothing is typed into a
-        // pane that can't be seen.
+        if (pane.getMapped() == 0) return .left;
+        if (a.inDialog()) return .left;
+        // The board is over the panes too, with keys of its own: h, j, k and l move through
+        // its cards. Rex's keys still get through, so the key that opened it closes it.
         if (a.board.shown()) {
-            if (keyval == 0xff1b) a.showBoard(false);
-            return 1;
+            const chord = termview.chordPending();
+            if (!chord and a.board.handleKey(keyval, mods)) return .taken;
+            if (!keys.isModifier(keyval) and !chord and !a.beginsBinding(keyval, mods)) return .taken;
         }
         // Find in the pane: Command+F on a Mac, Ctrl+Shift+F elsewhere, as terminals have it.
-        const K = @import("../terminal/keys.zig");
-        const mods = K.modsFromGdk(@bitCast(state));
-        const find_mods: u4 = if (builtin.os.tag == .macos) K.super else K.ctrl | K.shift;
+        const find_mods: u4 = if (builtin.os.tag == .macos) keys.super else keys.ctrl | keys.shift;
         if ((keyval == 'f' or keyval == 'F') and mods == find_mods) {
             a.openFind();
-            return 1;
+            return .taken;
         }
+        const focus = a.window.as(gtk.Root).getFocus();
         if (focus) |f| {
-            if (f == pane) return 0;
+            if (f == pane) return .left;
             inline for (.{ gtk.Text, gtk.TextView }) |T| {
-                if (f.getAncestor(T.getGObjectType()) != null) return 0;
+                if (f.getAncestor(T.getGObjectType()) != null) return .left;
             }
         }
-        if (@import("../terminal/keys.zig").isModifier(keyval)) return 0;
-        _ = pane.grabFocus();
-        return ctl.forward(pane);
+        if (keys.isModifier(keyval)) return .left;
+        // With the keyboard in the sidebar, its keys move through the rows. Any other key
+        // leaves it for the pane, as typing anywhere else does.
+        if (a.sidebarCursor() != null) {
+            if (a.sidebarKey(keyval, mods)) return .taken;
+            if (a.sidebar_peek) {
+                a.sidebar_peek = false;
+                a.split.setShowSidebar(0);
+            }
+        }
+        return .to_pane;
+    }
+
+    /// Whether the keyboard is in a menu or a dialog, which keep their keys.
+    fn inDialog(a: *App) bool {
+        const f = a.window.as(gtk.Root).getFocus() orelse return false;
+        return f.getAncestor(gtk.Popover.getGObjectType()) != null or f.getAncestor(adw.Dialog.getGObjectType()) != null;
     }
 
     fn sidebarShown(split: *adw.OverlaySplitView, _: *gobject.ParamSpec, a: *App) callconv(.c) void {
@@ -1794,6 +1963,9 @@ pub const App = struct {
         } else {
             a.rebuilding = true;
             defer a.rebuilding = false;
+            // A session dropped in a new place arrives here in its new order; one still being
+            // dragged loses its rows, and the drag ends.
+            reorder.rebuilt();
             a.sidebar.removeAll();
             for (a.rows.items) |r| if (r) |row| {
                 gpa.free(row.session_id);
@@ -1904,6 +2076,13 @@ pub const App = struct {
                 head_row.setSelectable(@intFromBool(above));
                 head_row.as(gtk.Widget).addCssClass("session-row");
                 if (above) head_row.as(gtk.Widget).addCssClass("session-pick");
+                // Dragged by its heading, a session goes to another place among its host's.
+                const drag = gtk.GestureDrag.new();
+                _ = gtk.GestureDrag.signals.drag_begin.connect(drag, *App, &sessionDragBegin, a, .{});
+                _ = gtk.GestureDrag.signals.drag_update.connect(drag, *App, &sessionDragUpdate, a, .{});
+                _ = gtk.GestureDrag.signals.drag_end.connect(drag, *App, &sessionDragEnd, a, .{});
+                _ = gtk.Gesture.signals.cancel.connect(drag.as(gtk.Gesture), *App, &sessionDragCancel, a, .{});
+                head_row.as(gtk.Widget).addController(drag.as(gtk.EventController));
                 a.sidebar.append(head_row.as(gtk.Widget));
                 a.rows.appendAssumeCapacity(picked);
                 a.row_marks.appendAssumeCapacity(.{ .key = want.key, .label = label });
@@ -2347,6 +2526,104 @@ pub const App = struct {
         return 1;
     }
 
+    fn sessionDragBegin(_: *gtk.GestureDrag, _: f64, y: f64, a: *App) callconv(.c) void {
+        a.session_grab_y = y;
+        a.session_dragging = false;
+        a.session_drag_refused = false;
+    }
+
+    fn sessionDragUpdate(drag: *gtk.GestureDrag, _: f64, dy: f64, a: *App) callconv(.c) void {
+        if (a.session_dragging) return reorder.update(dy);
+        // A press that barely moves is a click, on the heading or one of its buttons.
+        if (a.session_drag_refused or @abs(dy) < 6) return;
+        const row = drag.as(gtk.EventController).getWidget() orelse return;
+        if (!a.startSessionDrag(row)) {
+            a.session_drag_refused = true;
+            return;
+        }
+        a.session_dragging = true;
+        _ = drag.as(gtk.Gesture).setState(.claimed);
+        reorder.update(dy);
+    }
+
+    fn sessionDragEnd(_: *gtk.GestureDrag, _: f64, _: f64, a: *App) callconv(.c) void {
+        if (!a.session_dragging) return;
+        a.session_dragging = false;
+        reorder.drop();
+    }
+
+    fn sessionDragCancel(_: *gtk.Gesture, _: ?*gdk.EventSequence, a: *App) callconv(.c) void {
+        if (!a.session_dragging) return;
+        a.session_dragging = false;
+        reorder.cancel();
+    }
+
+    /// Lifts the session whose heading is `head` out of the sidebar, to be dragged among the
+    /// other sessions of its host. False when there is nowhere to drag it to.
+    fn startSessionDrag(a: *App, head: *gtk.Widget) bool {
+        if (reorder.busy()) return false;
+        if (a.sidebar_stale) a.refreshNow();
+        var plan: std.ArrayList(RowPlan) = .empty;
+        defer plan.deinit(gpa);
+        a.planSidebar(&plan);
+        // The plan is the sidebar's rows, one for one, while the two are in step.
+        if (plan.items.len != a.row_marks.items.len) return false;
+        for (plan.items, a.row_marks.items) |want, have| if (want.key != have.key) return false;
+        const row = gobject.ext.cast(gtk.ListBoxRow, head) orelse return false;
+        const index = row.getIndex();
+        if (index < 0 or index >= plan.items.len) return false;
+        const at: usize = @intCast(index);
+        if (plan.items[at].kind != .session) return false;
+        const h = plan.items[at].host;
+        var groups: std.ArrayList(reorder.Group) = .empty;
+        defer groups.deinit(gpa);
+        a.clearDragIds();
+        var dragged: usize = 0;
+        for (plan.items, 0..) |want, i| {
+            if (want.host != h) continue;
+            switch (want.kind) {
+                .host => {},
+                .session => {
+                    if (i == at) dragged = groups.items.len;
+                    groups.append(gpa, .{ .first = i, .count = 1 }) catch return false;
+                    a.drag_ids.append(gpa, gpa.dupe(u8, want.session.?.id) catch return false) catch return false;
+                },
+                .window, .agent => if (groups.items.len > 0) {
+                    groups.items[groups.items.len - 1].count += 1;
+                },
+            }
+        }
+        a.drag_host = .{ .host = h, .serial = h.serial };
+        return reorder.begin(a.sidebar, a.sidebar_layer, a.sidebar_scroller, groups.items, dragged, head, a.session_grab_y, .{ .ctx = a, .f = &sessionDropped });
+    }
+
+    fn clearDragIds(a: *App) void {
+        for (a.drag_ids.items) |id| gpa.free(id);
+        a.drag_ids.clearRetainingCapacity();
+    }
+
+    /// A dragged session landed: it was the `from`th of the sessions shown for its host and is
+    /// to be the `to`th. The server is asked to move it, and the sidebar follows the server.
+    fn sessionDropped(ctx: *anyopaque, from: usize, to: usize) void {
+        const a: *App = @ptrCast(@alignCast(ctx));
+        const h = a.liveHost(a.drag_host orelse return) orelse return;
+        const ids = a.drag_ids.items;
+        if (from >= ids.len or to >= ids.len or from == to) return;
+        const sessions = h.server.sessions.items;
+        // Moved up, it goes before the session whose place it takes. Moved down, before
+        // whichever session follows the one it lands under, or to the very end.
+        var before: ?[]const u8 = null;
+        if (to < from) {
+            before = ids[to];
+        } else for (sessions, 0..) |session, k| if (std.mem.eql(u8, session.id, ids[to])) {
+            var next = k + 1;
+            if (next < sessions.len and std.mem.eql(u8, sessions[next].id, ids[from])) next += 1;
+            if (next < sessions.len) before = sessions[next].id;
+            break;
+        };
+        h.server.moveSession(ids[from], before);
+    }
+
     /// Moves the shown session one place up or down the sidebar.
     fn moveSessionStep(a: *App, session_id: []const u8, down: bool) void {
         const s = a.server orelse return;
@@ -2546,6 +2823,8 @@ pub const App = struct {
         }
         if (std.mem.startsWith(u8, action, "client.palette.")) return a.did(openPalette);
         if (std.mem.eql(u8, action, "client.sidebar.toggle")) return a.did(toggleSidebar);
+        if (std.mem.eql(u8, action, "client.sidebar.focus")) return a.did(focusSidebar);
+        if (std.mem.eql(u8, action, "client.board.toggle")) return a.did(toggleBoard);
         if (std.mem.eql(u8, action, "client.fullscreen.toggle")) return a.did(toggleBare);
         if (std.mem.eql(u8, action, "client.overview.toggle")) return a.did(toggleOverview);
         if (std.mem.eql(u8, action, "client.tab.rename")) {
@@ -2807,6 +3086,8 @@ pub const App = struct {
         };
         _ = gtk.ListBox.signals.row_activated.connect(list, *adw.Dialog, &Picked.run, dialog, .{});
         const scroller = gtk.ScrolledWindow.new();
+        // It scrolls, with no bar drawn: nothing in Renux shows one but a terminal's history.
+        scroller.setPolicy(.external, .external);
         scroller.setChild(list.as(gtk.Widget));
         scroller.as(gtk.Widget).addCssClass("palette");
         dialog.setChild(scroller.as(gtk.Widget));
@@ -3796,12 +4077,12 @@ pub const App = struct {
         var hbuf: [1024]u8 = undefined;
         const highlight = if (prefs.highlight_border) std.fmt.bufPrint(&hbuf,
             \\.pane-card.focused, .layer-card.focused {{ border-color: alpha({s}, {d:.2}); }}
-            \\.pane-card.focused {{ box-shadow: 0 0 0 1px alpha({s}, {d:.2}); }}
+            \\.pane-card.focused {{ box-shadow: 0 0 0 1px alpha({s}, {d:.2}), 0 0 8px alpha(black, 0.16); }}
             \\.pane-card.floating.focused {{ box-shadow: 0 0 0 1px alpha({s}, {d:.2}), 0 8px 28px alpha(black, 0.45); }}
             \\{s}
         , .{ color, prefs.highlight_opacity, color, prefs.highlight_opacity * 0.4, color, prefs.highlight_opacity * 0.4, if (prefs.highlight_animate) ".pane-card, .layer-card { transition: border-color 220ms ease-out, box-shadow 220ms ease-out; }" else "" }) catch "" else
             \\.pane-card.focused, .layer-card.focused { border-color: @renux_stroke_subtle; }
-            \\.pane-card.focused { box-shadow: none; }
+            \\.pane-card.focused { box-shadow: 0 0 8px alpha(black, 0.16); }
             \\.pane-card.floating.focused { box-shadow: 0 8px 28px alpha(black, 0.45); }
         ;
         // Full screen mode: the window draws nothing behind the panes. The board, which lies over
@@ -4175,7 +4456,8 @@ pub fn describeAction(a: *App, buf: []u8, action: []const u8, args: ?[]const u8,
         .{ "client.config.reload", "Reload config" },        .{ "client.sidebar.toggle", "Sidebar" },
         .{ "client.fullscreen.toggle", "Full screen mode" }, .{ "client.overview.toggle", "Overview" },
         .{ "client.sidebar.activity.toggle", "Activity" },   .{ "client.palette.toggle", "Commands" },
-        .{ "session.new", "New session" },                   .{ "session.switch", "Switch session" },
+        .{ "client.sidebar.focus", "Sidebar keys" },         .{ "session.new", "New session" },
+        .{ "client.board.toggle", "Agent Board" },           .{ "session.switch", "Switch session" },
         .{ "session.rename", "Rename session" },             .{ "session.next", "Next session" },
         .{ "session.previous", "Previous session" },
     };
@@ -4488,6 +4770,71 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
             if (a.current) |h| _ = App.perform(h, name, null, null);
             continue;
         }
+        if (std.mem.eql(u8, cmd, "board-keys")) {
+            // Keys as the open board hears them: `board-keys l j j enter`.
+            const named = [_]struct { []const u8, c_uint, u4 }{ .{ "enter", 0xff0d, 0 }, .{ "escape", 0xff1b, 0 }, .{ "ctrl+d", 'd', keys.ctrl }, .{ "ctrl+u", 'u', keys.ctrl } };
+            while (it.next()) |word| {
+                var keyval: c_uint = word[0];
+                var mods: u4 = 0;
+                for (named) |n| if (std.mem.eql(u8, n[0], word)) {
+                    keyval = n[1];
+                    mods = n[2];
+                };
+                _ = a.board.handleKey(keyval, mods);
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, cmd, "sidebar-keys")) {
+            // The keyboard in the sidebar: `sidebar-keys` sends it there, and each word after
+            // is a key pressed there, such as `sidebar-keys j j ctrl+d enter`.
+            // `sidebar-keys where` only says where the keyboard is.
+            if (std.mem.eql(u8, rest, "where")) {
+                if (a.sidebarCursor()) |at| std.log.info("sidebar cursor on row {d}", .{at}) else std.log.info("sidebar cursor: none, the keyboard is elsewhere", .{});
+                continue;
+            }
+            if (a.sidebarCursor() == null) a.focusSidebar();
+            const named = [_]struct { []const u8, c_uint, u4 }{ .{ "enter", 0xff0d, 0 }, .{ "escape", 0xff1b, 0 }, .{ "ctrl+d", 'd', keys.ctrl }, .{ "ctrl+u", 'u', keys.ctrl } };
+            while (it.next()) |word| {
+                var keyval: c_uint = word[0];
+                var mods: u4 = 0;
+                for (named) |n| if (std.mem.eql(u8, n[0], word)) {
+                    keyval = n[1];
+                    mods = n[2];
+                };
+                _ = a.sidebarKey(keyval, mods);
+            }
+            if (a.sidebarCursor()) |at| std.log.info("sidebar cursor on row {d}", .{at});
+            continue;
+        }
+        if (std.mem.eql(u8, cmd, "session-drag")) {
+            // Dragging a session in the sidebar without a mouse: `session-drag 1 80` takes hold
+            // of the second session's heading and moves it 80 down, `session-drag move 120`
+            // moves it on, and `session-drag drop` lets go.
+            const what = it.next() orelse continue;
+            if (std.mem.eql(u8, what, "drop")) {
+                a.session_dragging = false;
+                reorder.drop();
+            } else if (std.mem.eql(u8, what, "move")) {
+                reorder.update(std.fmt.parseFloat(f64, it.next() orelse "0") catch 0);
+            } else {
+                var nth = std.fmt.parseInt(usize, what, 10) catch continue;
+                var child = a.sidebar.as(gtk.Widget).getFirstChild();
+                while (child) |c| : (child = c.getNextSibling()) {
+                    if (c.hasCssClass("session-row") == 0) continue;
+                    if (nth > 0) {
+                        nth -= 1;
+                        continue;
+                    }
+                    a.session_grab_y = 8;
+                    if (a.startSessionDrag(c)) {
+                        a.session_dragging = true;
+                        reorder.update(std.fmt.parseFloat(f64, it.next() orelse "0") catch 0);
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
         if (std.mem.eql(u8, cmd, "overview-key")) {
             // Keys as the open overview hears them: overview-key right enter
             const named = [_]struct { []const u8, c_uint }{ .{ "left", 0xff51 }, .{ "up", 0xff52 }, .{ "right", 0xff53 }, .{ "down", 0xff54 }, .{ "enter", 0xff0d }, .{ "escape", 0xff1b }, .{ "x", 'x' }, .{ "c", 'c' }, .{ "s", 's' } };
@@ -4546,7 +4893,15 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
                 };
                 if (keyval == 0) continue;
                 const target = (a.workspace orelse ws).focusedView() orelse tv;
-                _ = target.handleKey(keyval, mods);
+                // As a real key goes: the window hears it first, and may keep it.
+                switch (a.routeKey(keyval, mods)) {
+                    .taken => {},
+                    .left => _ = target.handleKey(keyval, mods),
+                    .to_pane => {
+                        _ = target.widget().grabFocus();
+                        _ = target.handleKey(keyval, mods);
+                    },
+                }
             }
         } else if (std.mem.eql(u8, cmd, "bench")) {
             tv.bench();
@@ -4592,6 +4947,15 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
             t.selectWord(x, y);
         } else if (std.mem.eql(u8, cmd, "copy")) {
             tv.copySelection(false);
+        } else if (std.mem.eql(u8, cmd, "physical-key")) {
+            // A key as the keyboard gives it: `physical-key down j` (again while down is a
+            // repeat) and `physical-key up j`.
+            const dir = it.next() orelse continue;
+            const what = it.next() orelse continue;
+            const cp = std.unicode.utf8Decode(what[0 .. std.unicode.utf8ByteSequenceLength(what[0]) catch continue]) catch continue;
+            // Any number stands for the key on the keyboard, as long as down and up agree.
+            const keycode: c_uint = 1000 + @as(c_uint, cp);
+            if (std.mem.eql(u8, dir, "down")) tv.sendPress(keys.forChar(cp, 0), keycode) else tv.releaseKey(keycode);
         } else if (std.mem.eql(u8, cmd, "type")) {
             const view_ = std.unicode.Utf8View.init(rest) catch continue;
             var cps = view_.iterator();
@@ -4630,6 +4994,9 @@ const FrameLog = struct {
     }
 
     fn watch(clock: *gdk.FrameClock) void {
+        // Every frame starts here. The later phases only say when one starts if they run at
+        // all, and a handler added to `paint` runs after the painting it was meant to time.
+        _ = gdk.FrameClock.signals.before_paint.connect(clock, ?*anyopaque, &began, null, .{});
         _ = gdk.FrameClock.signals.update.connect(clock, ?*anyopaque, &began, null, .{});
         _ = gdk.FrameClock.signals.layout.connect(clock, ?*anyopaque, &began, null, .{});
         _ = gdk.FrameClock.signals.layout.connect(clock, ?*anyopaque, &laidOut, null, .{ .after = true });
@@ -4744,13 +5111,23 @@ fn takeShot(_: ?*anyopaque) callconv(.c) c_int {
     const height: f64 = @floatFromInt(w.getHeight());
     const snap = gtk.Snapshot.new();
     // RENUX_SHOT_SCALE=2 saves the picture at twice the size, as a HiDPI screen shows it.
-    const scale: f32 = if (std.c.getenv("RENUX_SHOT_SCALE")) |v| std.fmt.parseFloat(f32, std.mem.span(v)) catch 1 else 1;
+    const scale: f32 = @floatCast(termview.shotScale() orelse 1);
     if (scale != 1) snap.scale(scale, scale);
+    // On screen the window sits some way into its surface, past its shadow, and that is rarely
+    // a whole number of pixels. The picture starts the same part of a pixel in, so that what
+    // is lined up with the screen's pixels is lined up with the picture's too.
+    var into_x: f64 = 0;
+    var into_y: f64 = 0;
+    a.window.as(gtk.Native).getSurfaceTransform(&into_x, &into_y);
+    snap.translate(&.{ .f_x = @floatCast(@mod(into_x * scale, 1) / scale), .f_y = @floatCast(@mod(into_y * scale, 1) / scale) });
     paintable.as(gdk.Paintable).snapshot(snap.as(gdk.Snapshot), width, height);
     const node = snap.freeToNode() orelse return 1;
     defer node.unref();
     const renderer = a.window.as(gtk.Native).getRenderer() orelse return 1;
-    const texture = renderer.renderTexture(node, null);
+    // The picture starts at the corner, not at the drawing's own edge, which would take the
+    // part-pixel offset straight back out.
+    var whole: @import("graphene").Rect = .{ .f_origin = .{ .f_x = 0, .f_y = 0 }, .f_size = .{ .f_width = @ceil(@as(f32, @floatCast(width)) * scale) + 1, .f_height = @ceil(@as(f32, @floatCast(height)) * scale) + 1 } };
+    const texture = renderer.renderTexture(node, &whole);
     defer texture.as(gobject.Object).unref();
     _ = texture.saveToPng(path);
     // The settings page showing, whole, with what is scrolled out of sight.

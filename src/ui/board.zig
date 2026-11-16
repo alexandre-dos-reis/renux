@@ -13,6 +13,7 @@ const icons = @import("../icons/icons.zig");
 const programs = @import("../icons/programs.zig");
 const art = @import("../settings/settings_art.zig");
 const TermView = @import("../terminal/termview.zig").TermView;
+const keys = @import("../terminal/keys.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -67,6 +68,11 @@ pub const Board = struct {
     /// laid out again when its rows or their order change.
     laid_out: [4]u64 = .{ 0, 0, 0, 0 },
     cards: std.ArrayList(*Card) = .empty,
+    /// The whole board, which holds the keyboard itself when there is no card to hold it.
+    page: *gtk.Widget = undefined,
+    /// The card the keyboard is on, moved with h, j, k and l.
+    cursor: ?*Card = null,
+    take_idle: c_uint = 0,
     refresh_source: c_uint = 0,
     clock: c_uint = 0,
 
@@ -78,6 +84,8 @@ pub const Board = struct {
 
         const page = gtk.Box.new(.vertical, 12);
         page.as(gtk.Widget).addCssClass("board");
+        page.as(gtk.Widget).setFocusable(1);
+        b.page = page.as(gtk.Widget);
         const head = gtk.Box.new(.horizontal, 8);
         const title = gtk.Label.new("Agents");
         title.as(gtk.Widget).addCssClass("board-title");
@@ -135,7 +143,7 @@ pub const Board = struct {
             inner.append(b.lists[i].as(gtk.Widget));
             inner.append(b.empties[i]);
             const scroller = gtk.ScrolledWindow.new();
-            scroller.setPolicy(.never, .automatic);
+            scroller.setPolicy(.never, .external);
             scroller.as(gtk.Widget).setVexpand(1);
             scroller.setChild(inner.as(gtk.Widget));
             column.append(scroller.as(gtk.Widget));
@@ -179,6 +187,105 @@ pub const Board = struct {
         // Hidden, the board lets the pointer through to the panes under it.
         b.widget().setCanTarget(@intFromBool(on));
         b.revealer.setRevealChild(@intFromBool(on));
+        // The keyboard comes with it, once its cards are on screen to take it.
+        if (on and b.take_idle == 0) b.take_idle = glib.idleAdd(&takeKeyboardLater, b);
+    }
+
+    fn takeKeyboardLater(data: ?*anyopaque) callconv(.c) c_int {
+        const b: *Board = @ptrCast(@alignCast(data.?));
+        b.take_idle = 0;
+        if (b.shown()) b.takeKeyboard();
+        return 0;
+    }
+
+    /// Puts the keyboard on a card: the one it was on last, or else the first of whichever
+    /// column most wants looking at. With no cards the board itself holds it, so Escape
+    /// still closes.
+    fn takeKeyboard(b: *Board) void {
+        if (b.cursor) |c| if (c.column != null) return b.focusCard(c, false);
+        var buf: [256]*Card = undefined;
+        for ([_]Column{ .attention, .done, .running, .idle }) |col| {
+            const in = b.cardsIn(col, &buf);
+            if (in.len > 0) return b.focusCard(in[0], false);
+        }
+        b.cursor = null;
+        _ = b.page.grabFocus();
+    }
+
+    /// `ring` shows the outline that marks the card: wanted once keys are moving it.
+    fn focusCard(b: *Board, c: *Card, ring: bool) void {
+        b.cursor = c;
+        if (ring) b.app.window.as(gtk.Window).setFocusVisible(1);
+        _ = c.button.as(gtk.Widget).grabFocus();
+    }
+
+    /// A column's cards from top to bottom, as they are laid out.
+    fn cardsIn(b: *Board, col: Column, buf: []*Card) []*Card {
+        var n: usize = 0;
+        var child = b.lists[@backingInt(col)].as(gtk.Widget).getFirstChild();
+        while (child) |w| : (child = w.getNextSibling()) {
+            if (n == buf.len) break;
+            for (b.cards.items) |c| if (c.button.as(gtk.Widget) == w) {
+                buf[n] = c;
+                n += 1;
+                break;
+            };
+        }
+        return buf[0..n];
+    }
+
+    /// A key while the board is open, which the window hears first: h and l change column, j and k move within one, Ctrl+D
+    /// and Ctrl+U jump, g and G go to a column's ends, Enter goes to the card's pane and
+    /// Escape goes back to the panes. True when the key was one of these.
+    pub fn handleKey(b: *Board, keyval: c_uint, mods: u4) bool {
+        if (!b.shown()) return false;
+        var buf: [256]*Card = undefined;
+        const at = b.cursor;
+        const col: ?Column = if (at) |c| c.column else null;
+        const in: []*Card = if (col) |k| b.cardsIn(k, &buf) else &.{};
+        const index: ?usize = if (at) |c| std.mem.indexOfScalar(*Card, in, c) else null;
+        if (mods == keys.ctrl) {
+            switch (keyval) {
+                'd', 'D' => b.step(in, index, 3),
+                'u', 'U' => b.step(in, index, -3),
+                else => return false,
+            }
+            return true;
+        }
+        if (mods & ~@as(u4, keys.shift) != 0) return false;
+        switch (keyval) {
+            'j', 0xff54 => b.step(in, index, 1),
+            'k', 0xff52 => b.step(in, index, -1),
+            'g', 0xff50 => b.step(in, index, -@as(isize, @intCast(in.len))),
+            'G', 0xff57 => b.step(in, index, @intCast(in.len)),
+            'h', 0xff51 => b.across(col, index, -1),
+            'l', 0xff53 => b.across(col, index, 1),
+            0xff0d, 0xff8d, ' ' => if (at) |c| open(c),
+            0xff1b, 'q' => b.app.showBoard(false),
+            else => return false,
+        }
+        return true;
+    }
+
+    /// Moves the keyboard `by` cards down its column, stopping at the ends.
+    fn step(b: *Board, in: []*Card, index: ?usize, by: isize) void {
+        const i = index orelse return b.takeKeyboard();
+        if (in.len == 0) return;
+        const to = std.math.clamp(@as(isize, @intCast(i)) + by, 0, @as(isize, @intCast(in.len - 1)));
+        b.focusCard(in[@intCast(to)], true);
+    }
+
+    /// Moves the keyboard to the next column that has cards, left or right, onto the card as
+    /// far down as the one it leaves.
+    fn across(b: *Board, col: ?Column, index: ?usize, dir: isize) void {
+        const from = col orelse return b.takeKeyboard();
+        var buf: [256]*Card = undefined;
+        var k: isize = @as(isize, @intCast(@backingInt(from))) + dir;
+        while (k >= 0 and k < 4) : (k += dir) {
+            const in = b.cardsIn(@fromBackingInt(@intCast(@as(usize, @intCast(k)))), &buf);
+            if (in.len == 0) continue;
+            return b.focusCard(in[@min(index orelse 0, in.len - 1)], true);
+        }
     }
 
     fn groupingToggled(button: *gtk.ToggleButton, b: *Board) callconv(.c) void {
@@ -248,10 +355,13 @@ pub const Board = struct {
                 continue;
             }
             if (c.button.as(gtk.Widget).getParent()) |parent| @as(*gtk.Box, @ptrCast(parent)).remove(c.button.as(gtk.Widget));
+            if (b.cursor == c) b.cursor = null;
             _ = b.cards.swapRemove(i);
             c.free();
         }
         b.layout();
+        // A card laid out again, or gone, lets go of the keyboard: it goes back to a card.
+        if (b.shown() and b.app.window.as(gtk.Window).getFocus() == null) b.takeKeyboard();
         var totals = [_]usize{ 0, 0, 0, 0 };
         for (b.cards.items) |c| if (c.column) |col| {
             totals[@backingInt(col)] += 1;
@@ -486,6 +596,11 @@ pub const Board = struct {
     }
 
     fn cardClicked(_: *gtk.Button, c: *Card) callconv(.c) void {
+        open(c);
+    }
+
+    /// Leaves the board for the card's pane.
+    fn open(c: *Card) void {
         const b = c.board;
         // Only a host that is still here; a card can outlive its host by a moment.
         if (std.mem.indexOfScalar(*app_mod.Host, b.app.hosts.items, c.host) == null) return;

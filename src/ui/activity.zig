@@ -73,7 +73,7 @@ pub const Activity = struct {
         list.setSelectionMode(.none);
         list.setActivateOnSingleClick(1);
         const scroller = gtk.ScrolledWindow.new();
-        scroller.setPolicy(.never, .automatic);
+        scroller.setPolicy(.never, .external);
         scroller.as(gtk.Widget).setVexpand(1);
         scroller.setChild(list.as(gtk.Widget));
         panel.append(scroller.as(gtk.Widget));

@@ -118,6 +118,8 @@ pub fn openDiagnostics(a: *App) void {
     label.as(gtk.Widget).setMarginEnd(16);
     label.as(gtk.Widget).setMarginTop(12);
     const scroller = gtk.ScrolledWindow.new();
+    // It scrolls, with no bar drawn: nothing in Renux shows one but a terminal's history.
+    scroller.setPolicy(.external, .external);
     scroller.setChild(label.as(gtk.Widget));
     view.setContent(scroller.as(gtk.Widget));
     dialog.setChild(view.as(gtk.Widget));

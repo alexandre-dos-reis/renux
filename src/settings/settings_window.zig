@@ -1215,9 +1215,10 @@ const HostRow = struct { ctx: *Ctx, index: usize };
 
 fn hostsPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
-    const remote = group(p, "Keys and Colors");
+    const remote = group(p, "Keys, Colors and Links");
     switchRow(ctx, remote, "Use this computer's keys on remote hosts", "Panes on a remote host answer to the Rex config here instead of that host's own", &settings.current.local_keys, App.remoteOptionsChanged);
     switchRow(ctx, remote, "Use each remote host's own colors", "Panes on a remote host take that host's terminal colors instead of the theme picked here", &settings.current.remote_colors, App.remoteOptionsChanged);
+    switchRow(ctx, remote, "Open remote links on this computer", "Ctrl+click on a link in a remote host's pane opens it here, rather than leaving it to the program there, which opens it on that host", &settings.current.remote_links_here, null);
     const g = group(p, "Remote Hosts");
     for (settings.current.hosts.items, 0..) |h, i| {
         const row = adw.ActionRow.new();
