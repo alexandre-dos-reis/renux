@@ -7,9 +7,13 @@ pub const ctrl = 2;
 pub const alt = 4;
 pub const super = 8;
 
+/// What happened to a key: it went down, it came up, or it is held and repeating.
+pub const Action = enum { press, release, repeat };
+
 pub const Key = struct {
     name: []const u8,
     mods: u4 = 0,
+    action: Action = .press,
     consumed_shift: bool = false,
     text_buf: [8]u8 = undefined,
     text_len: u8 = 0,
@@ -34,7 +38,7 @@ pub const Key = struct {
         try jw.objectField("composing");
         try jw.write(false);
         try jw.objectField("action");
-        try jw.write("press");
+        try jw.write(@tagName(k.action));
         try jw.endObject();
     }
 };
@@ -441,6 +445,22 @@ test "Caps Lock doesn't turn Ctrl+A into Ctrl+Shift+A" {
     // Shift held, or no Control at all, leaves the capital alone.
     try std.testing.expectEqual(@as(u32, 'A'), uncapsed('A', ctrl | shift));
     try std.testing.expectEqual(@as(u32, 'A'), uncapsed('A', 0));
+}
+
+test "a key says whether it went down, repeats or came up" {
+    var buf: [256]u8 = undefined;
+    var key = forChar('j', 0);
+    key.action = .repeat;
+    var w: std.Io.Writer = .fixed(&buf);
+    try std.json.Stringify.value(key, .{}, &w);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "\"action\":\"repeat\"") != null);
+    key.action = .release;
+    key.text_len = 0;
+    w = .fixed(&buf);
+    try std.json.Stringify.value(key, .{}, &w);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "\"key\":\"key_j\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "\"text\":\"\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "\"action\":\"release\"") != null);
 }
 
 test "Control combinations on a layout without Latin letters use the key's Latin symbol" {

@@ -106,6 +106,7 @@ test {
     _ = @import("icons/blockicon.zig");
     _ = @import("ui/palette.zig");
     _ = @import("ui/overview.zig");
+    _ = @import("ui/reorder.zig");
     _ = @import("settings/settings.zig");
     _ = @import("theme/themes.zig");
     _ = @import("settings/settings_window.zig");
@@ -114,4 +115,5 @@ test {
     _ = @import("rex/tailscale.zig");
     _ = @import("util/qr.zig");
     _ = @import("terminal/shader.zig");
+    _ = @import("terminal/glide.zig");
 }

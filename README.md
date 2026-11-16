@@ -77,7 +77,9 @@ rex.bind("ctrl+a>shift+o", "client.overview.toggle")   -- every tab at once
 rex.bind("ctrl+a>shift+f", "client.fullscreen.toggle") -- only the terminals
 ```
 
-Both are in the command palette too, and the overview has a button at the foot of the sidebar.
+The overview and the agent board are off until you switch them on in Settings, under
+Developer. Both actions are in the command palette too, and the overview has a button at the
+foot of the sidebar.
 In the overview, the arrow keys or `h` `j` `k` `l` move between tabs, Enter goes to one and
 Escape goes back. `x` closes the tab the ring is on, `c` opens a new tab in its session and
 goes to it, and `s` groups the tabs by session.

@@ -83,6 +83,9 @@ pub const Settings = struct {
     local_keys: bool = false,
     /// Panes on remote hosts take their host's terminal colors, not the theme picked here.
     remote_colors: bool = false,
+    /// Ctrl+click on a link in a remote host's pane opens it on this computer, even when the
+    /// program there takes the mouse and would open it on its own host.
+    remote_links_here: bool = true,
     /// The overview shows each session's tabs together under its name.
     overview_by_session: bool = false,
     /// The close, minimize and maximize buttons in the window's top left corner are shown.
@@ -110,6 +113,9 @@ pub const Settings = struct {
     copy_animation: bool = true,
     /// The agent board lists each column's cards under their sessions' names.
     board_by_session: bool = false,
+    agent_board: bool = false,
+    overview: bool = false,
+    program_scroll_glide: bool = false,
     /// Link schemes, such as vscode, that open their app without asking.
     trusted_schemes: std.ArrayList([]u8) = .empty,
     tab_position: TabPosition = .left,

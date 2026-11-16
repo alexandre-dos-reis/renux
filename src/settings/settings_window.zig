@@ -31,6 +31,7 @@ const sections = [_]Section{
     .{ .title = "Shortcuts", .icon = .keyboard, .build = shortcutsPage },
     .{ .title = "Notifications", .icon = .bell, .build = notificationsPage },
     .{ .title = "Remote Hosts", .icon = .add_host, .build = hostsPage },
+    .{ .title = "Developer", .icon = .gear, .build = developerPage },
 };
 
 /// One open Settings window. Everything its rows point at is in `arena` or in here, and both
@@ -1209,15 +1210,29 @@ fn notificationsPage(ctx: *Ctx) *gtk.Widget {
     return p.as(gtk.Widget);
 }
 
+// Developer.
+
+fn developerPage(ctx: *Ctx) *gtk.Widget {
+    const p = page();
+    const st = &settings.current;
+    const views = group(p, "Views");
+    switchRow(ctx, views, "Agent board", "Programs sorted into Idle, Running, Attention and Done", &st.agent_board, App.viewsChanged);
+    switchRow(ctx, views, "Overview", "Every tab at once, in a grid", &st.overview, App.viewsChanged);
+    const experiments = group(p, "Experiments");
+    switchRow(ctx, experiments, "Smooth scrolling in full-screen programs", "Text glides between the steps a program such as pi or Neovim scrolls by", &st.program_scroll_glide, App.redrawAllPub);
+    return p.as(gtk.Widget);
+}
+
 // Remote hosts.
 
 const HostRow = struct { ctx: *Ctx, index: usize };
 
 fn hostsPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
-    const remote = group(p, "Keys and Colors");
+    const remote = group(p, "Keys, Colors and Links");
     switchRow(ctx, remote, "Use this computer's keys on remote hosts", "Panes on a remote host answer to the Rex config here instead of that host's own", &settings.current.local_keys, App.remoteOptionsChanged);
     switchRow(ctx, remote, "Use each remote host's own colors", "Panes on a remote host take that host's terminal colors instead of the theme picked here", &settings.current.remote_colors, App.remoteOptionsChanged);
+    switchRow(ctx, remote, "Open remote links on this computer", "Ctrl+click on a link in a remote host's pane opens it here, rather than leaving it to the program there, which opens it on that host", &settings.current.remote_links_here, null);
     const g = group(p, "Remote Hosts");
     for (settings.current.hosts.items, 0..) |h, i| {
         const row = adw.ActionRow.new();

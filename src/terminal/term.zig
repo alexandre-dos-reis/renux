@@ -1,8 +1,10 @@
 //! A libghostty-vt terminal and the frame copied out of it for drawing. Main thread only.
 const std = @import("std");
 const c = @import("vtc");
+const glib = @import("glib");
 
 const gpa = std.heap.c_allocator;
+const longest_hold_us = 1_000_000;
 
 pub const Flags = packed struct(u16) {
     bold: bool = false,
@@ -101,6 +103,9 @@ pub const Term = struct {
     rows: c.GhosttyRenderStateRowIterator = null,
     cells: c.GhosttyRenderStateRowCells = null,
     frame: Frame = .{},
+    honor_hold: bool = false,
+    held: bool = false,
+    hold_started_us: i64 = 0,
     image_iter: c.GhosttyRenderStateImageIterator = null,
     /// Kitty graphics images on screen, as of the last render.
     images: std.ArrayList(Image) = .empty,
@@ -139,7 +144,29 @@ pub const Term = struct {
         // Kitty graphics stay off until there's room to keep the images.
         var limit: u64 = 256 * 1024 * 1024;
         _ = c.ghostty_terminal_set(t, c.GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, &limit);
+        _ = c.ghostty_terminal_set(t, c.GHOSTTY_TERMINAL_OPT_USERDATA, self);
+        _ = c.ghostty_terminal_set(t, c.GHOSTTY_TERMINAL_OPT_RENDER_HOLD, @ptrCast(&renderHold));
         return self;
+    }
+
+    fn renderHold(_: c.GhosttyTerminal, userdata: ?*anyopaque, held: bool) callconv(.c) void {
+        const self: *Term = @ptrCast(@alignCast(userdata orelse return));
+        if (held) {
+            _ = c.ghostty_render_state_update(self.rs, self.term);
+            self.hold_started_us = glib.getMonotonicTime();
+        }
+        self.held = held;
+    }
+
+    fn holding(self: *Term) bool {
+        if (!self.held or !self.honor_hold) return false;
+        if (glib.getMonotonicTime() - self.hold_started_us < longest_hold_us) return true;
+        var mode: c.GhosttyTerminalModeConfig = std.mem.zeroes(c.GhosttyTerminalModeConfig);
+        mode.mode = c.GHOSTTY_MODE_SYNC_OUTPUT;
+        mode.value = false;
+        _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_MODE, &mode);
+        self.held = false;
+        return false;
     }
 
     /// Installs the decoder for PNG images that programs send, once for every terminal.
@@ -423,7 +450,7 @@ pub const Term = struct {
 
     /// Copies the screen into `frame`. False when nothing changed since last time.
     pub fn render(self: *Term, force: bool) bool {
-        if (c.ghostty_render_state_update(self.rs, self.term) != c.GHOSTTY_SUCCESS) return false;
+        if (!self.holding() and c.ghostty_render_state_update(self.rs, self.term) != c.GHOSTTY_SUCCESS) return false;
         var dirty: c.GhosttyRenderStateDirty = c.GHOSTTY_RENDER_STATE_DIRTY_FALSE;
         _ = c.ghostty_render_state_get(self.rs, c.GHOSTTY_RENDER_STATE_DATA_DIRTY, &dirty);
         if (!force and dirty == c.GHOSTTY_RENDER_STATE_DIRTY_FALSE) return false;

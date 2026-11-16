@@ -1954,12 +1954,87 @@ const PaneArea = extern struct {
             return;
         }
         // The tiled cards first, cut, then everything else in its own order above them.
-        window_bg.pushCut(sn, cut[0..n]);
+        if (n == 1) {
+            cutOne(w, ws.?, sn, cut[0]);
+        } else {
+            window_bg.pushCut(sn, cut[0..n]);
+            tiled(w, ws.?, sn);
+            sn.pop();
+        }
         var c = w.getFirstChild();
-        while (c) |child| : (c = child.getNextSibling()) if (ws.?.isTiledCard(child)) w.snapshotChild(child, sn);
-        sn.pop();
-        c = w.getFirstChild();
         while (c) |child| : (c = child.getNextSibling()) if (!ws.?.isTiledCard(child)) w.snapshotChild(child, sn);
+    }
+
+    fn tiled(w: *gtk.Widget, ws: *Workspace, sn: *gtk.Snapshot) void {
+        var c = w.getFirstChild();
+        while (c) |child| : (c = child.getNextSibling()) if (ws.isTiledCard(child)) w.snapshotChild(child, sn);
+    }
+
+    /// Draws the tiled cards with one floating card's place cut out of them, without a mask
+    /// over the lot. A mask makes the GPU draw every tiled card into a picture of its own and
+    /// then the hole into another, both the size of the hole, on each frame the floating pane
+    /// changes: that was most of what a busy floating pane cost over a tiled one.
+    ///
+    /// Instead the cards are drawn in pieces, each inside a plain rectangle, which costs
+    /// nothing: the four sides around the hole, and then the thin frame where the hole's edge
+    /// and its rounded corners fall, the only place a mask is still needed. The pieces meet on
+    /// whole screen pixels, so no line shows where two of them touch.
+    fn cutOne(w: *gtk.Widget, ws: *Workspace, sn: *gtk.Snapshot, hole: window_bg.Hole) void {
+        const grid = PixelGrid.of(w);
+        const far = 4096;
+        const x0: f64 = hole.rect.f_origin.f_x;
+        const y0: f64 = hole.rect.f_origin.f_y;
+        const x1 = x0 + hole.rect.f_size.f_width;
+        const y1 = y0 + hole.rect.f_size.f_height;
+        // The hole grown to whole pixels: outside it the cards are drawn as they are.
+        const ox0 = grid.down(x0, 0);
+        const oy0 = grid.down(y0, 1);
+        const ox1 = grid.up(x1, 0);
+        const oy1 = grid.up(y1, 1);
+        const right: f64 = @floatFromInt(w.getWidth() + far);
+        const bottom: f64 = @floatFromInt(w.getHeight() + far);
+        const plain = [_][4]f64{
+            .{ -far, -far, right, oy0 },
+            .{ -far, oy1, right, bottom },
+            .{ -far, oy0, ox0, oy1 },
+            .{ ox1, oy0, right, oy1 },
+        };
+        for (plain) |r| {
+            if (r[2] <= r[0] or r[3] <= r[1]) continue;
+            sn.pushClip(&rectOf(r));
+            tiled(w, ws, sn);
+            sn.pop();
+        }
+        // The frame: the rows holding the top and bottom corners, and between them the pixel
+        // or two the hole's sides fall in.
+        const radius: f64 = hole.radius;
+        var top = grid.up(y0 + radius, 1);
+        var low = grid.down(y1 - radius, 1);
+        if (low < top) {
+            top = grid.down((y0 + y1) / 2, 1);
+            low = top;
+        }
+        const framed = [_][4]f64{
+            .{ ox0, oy0, ox1, top },
+            .{ ox0, low, ox1, oy1 },
+            .{ ox0, top, grid.up(x0, 0), low },
+            .{ grid.down(x1, 0), top, ox1, low },
+        };
+        for (framed) |r| {
+            if (r[2] <= r[0] or r[3] <= r[1]) continue;
+            sn.pushClip(&rectOf(r));
+            window_bg.pushCut(sn, &.{hole});
+            tiled(w, ws, sn);
+            sn.pop();
+            sn.pop();
+        }
+    }
+
+    fn rectOf(r: [4]f64) graphene.Rect {
+        return .{
+            .f_origin = .{ .f_x = @floatCast(r[0]), .f_y = @floatCast(r[1]) },
+            .f_size = .{ .f_width = @floatCast(r[2] - r[0]), .f_height = @floatCast(r[3] - r[1]) },
+        };
     }
 
     fn dispose(self: *Self) callconv(.c) void {
@@ -1984,6 +2059,37 @@ const PaneArea = extern struct {
             return gobject.ext.as(T, class);
         }
     };
+};
+
+/// Where a widget's corner sits on the screen's pixels, and how many of them a unit is: for
+/// placing edges between two pixels rather than inside one.
+const PixelGrid = struct {
+    origin: [2]f64 = .{ 0, 0 },
+    scale: f64 = 1,
+
+    fn of(w: *gtk.Widget) PixelGrid {
+        var g: PixelGrid = .{};
+        const native = w.getNative() orelse return g;
+        if (native.getSurface()) |surface| g.scale = surface.getScale();
+        if (@import("../terminal/termview.zig").shotScale()) |scale| g.scale = scale;
+        var at: graphene.Point = undefined;
+        if (w.computePoint(native.as(gtk.Widget), &.{ .f_x = 0, .f_y = 0 }, &at) == 0) return g;
+        var dx: f64 = 0;
+        var dy: f64 = 0;
+        native.getSurfaceTransform(&dx, &dy);
+        g.origin = .{ at.f_x + dx, at.f_y + dy };
+        return g;
+    }
+
+    /// The pixel edge at or before a place, along x (0) or y (1).
+    fn down(g: PixelGrid, v: f64, axis: usize) f64 {
+        return @floor((v + g.origin[axis]) * g.scale + 0.001) / g.scale - g.origin[axis];
+    }
+
+    /// The pixel edge at or after a place.
+    fn up(g: PixelGrid, v: f64, axis: usize) f64 {
+        return @ceil((v + g.origin[axis]) * g.scale - 0.001) / g.scale - g.origin[axis];
+    }
 };
 
 /// How many workspaces are animating, for RENUX_PERF.

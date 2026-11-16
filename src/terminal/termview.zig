@@ -25,6 +25,7 @@ const programs = @import("../icons/programs.zig");
 const settings = @import("../settings/settings.zig");
 const shader = @import("shader.zig");
 const fonts = @import("fonts.zig");
+const glide_mod = @import("glide.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -34,6 +35,12 @@ pub var pad_y: f64 = 8;
 /// The theme's own background, for padding drawn in the theme's color.
 pub var theme_bg: u32 = 0;
 const size_debounce_ms = 200;
+const glide_armed_us = 400_000;
+const glide_unanswered_us = 250_000;
+const glide_fingers_gone_us = 300_000;
+const coast_fade_per_second = 0.05;
+const most_rows_a_step = 8.0;
+const coast_slowest_px_per_second = 15.0;
 
 pub const Font = struct {
     regular: *pango.FontDescription,
@@ -448,6 +455,17 @@ pub const TermView = struct {
     scroll_target: f64 = 0,
     scroll_velocity: f64 = 0,
     scroll_tick: c_uint = 0,
+    glide: glide_mod.Glide = .{},
+    glide_armed_until: i64 = 0,
+    glide_direction: glide_mod.Direction = .either,
+    glide_tick: c_uint = 0,
+    glide_frame_us: i64 = 0,
+    glide_unanswered: f64 = 0,
+    glide_steps_unanswered: f64 = 0,
+    glide_rows_a_step: f64 = 1,
+    glide_asked_us: i64 = 0,
+    glide_wheel_us: i64 = 0,
+    coast_rows_per_second: f64 = 0,
     /// The pane's textures for a custom shader, and the tick that redraws it while the shader
     /// moves with time.
     shader_pane: shader.Pane = .{},
@@ -464,8 +482,25 @@ pub const TermView = struct {
     last_frame_us: i64 = 0,
     last_total: u64 = 0,
     draw_frac: f64 = 0,
+    /// Where the pane's top left corner is in its window and how many screen pixels a unit of
+    /// its own is, as of the frame being drawn: what `pixelX` and `pixelY` go by.
+    pixel_origin: [2]f64 = .{ 0, 0 },
+    pixel_scale: f64 = 1,
     /// Where the pointer is over the pane, so the wheel scrolls what's under it.
     pointer: [2]f64 = .{ 0, 0 },
+    /// The keys held down whose presses went to the program, by the keyboard's own number for
+    /// each. A press of one already here is the keyboard repeating it, and its release is
+    /// sent when it comes up: programs that time held keys, as games do, need both.
+    held: [12]HeldKey = undefined,
+    held_len: usize = 0,
+    /// The keyboard's number for the key being handled, while a key press is.
+    event_keycode: c_uint = 0,
+    key_ctl: ?*gtk.EventControllerKey = null,
+    /// Ctrl is held with the pointer over the pane, which is when a click opens a link: the
+    /// link under the pointer is underlined, and the pointer becomes a hand over it.
+    link_armed: bool = false,
+    link_hand: bool = false,
+    pointer_in: bool = false,
     /// Text an input method is still composing, shown at the cursor until it's committed.
     preedit: ?[:0]u8 = null,
     /// This pane's text size relative to the setting, and its font at that size.
@@ -531,7 +566,9 @@ pub const TermView = struct {
         _ = gtk.Widget.signals.destroy.connect(w, *TermView, &onDestroy, v, .{});
 
         const key = gtk.EventControllerKey.new();
+        v.key_ctl = key;
         _ = gtk.EventControllerKey.signals.key_pressed.connect(key, *TermView, &onKey, v, .{});
+        _ = gtk.EventControllerKey.signals.key_released.connect(key, *TermView, &onKeyReleased, v, .{});
         // Typed text goes through the input method, so dead keys, compose sequences and input
         // methods for other scripts commit real text; other keys reach `onKey`.
         v.im = gtk.IMMulticontext.new();
@@ -551,6 +588,7 @@ pub const TermView = struct {
 
         const motion = gtk.EventControllerMotion.new();
         _ = gtk.EventControllerMotion.signals.motion.connect(motion, *TermView, &onMotion, v, .{});
+        _ = gtk.EventControllerMotion.signals.leave.connect(motion, *TermView, &onLeave, v, .{});
         w.addController(motion.as(gtk.EventController));
 
         const scroll = gtk.EventControllerScroll.new(.{ .vertical = true, .kinetic = true });
@@ -704,6 +742,8 @@ pub const TermView = struct {
             v.widget().removeTickCallback(v.scroll_tick);
             scroll_ticking -= 1;
         }
+        if (v.glide_tick != 0) v.widget().removeTickCallback(v.glide_tick);
+        v.glide.forget();
         if (v.shader_view) |sv| {
             if (v.shader_tick != 0) sv.as(gtk.Widget).removeTickCallback(v.shader_tick);
             sv.view = null;
@@ -848,7 +888,63 @@ pub const TermView = struct {
     fn onKey(_: *gtk.EventControllerKey, keyval: c_uint, keycode: c_uint, state: gdk.ModifierType, v: *TermView) callconv(.c) c_int {
         const bits: u32 = @bitCast(state);
         const mods = keys.modsFromGdk(bits);
+        if (isCtrlKey(keyval)) v.armLink(true);
+        v.event_keycode = keycode;
+        defer v.event_keycode = 0;
         return v.handleKey(v.latinKey(keyval, keycode, mods), mods);
+    }
+
+    fn onKeyReleased(_: *gtk.EventControllerKey, keyval: c_uint, keycode: c_uint, _: gdk.ModifierType, v: *TermView) callconv(.c) void {
+        if (isCtrlKey(keyval)) v.armLink(false);
+        v.releaseKey(keycode);
+    }
+
+    /// Sends a key press to the program, remembering which key on the keyboard it came from
+    /// (0 when unknown). A key already held is sent as a repeat.
+    pub fn sendPress(v: *TermView, key: keys.Key, keycode: c_uint) void {
+        var out = key;
+        if (keycode != 0) {
+            if (v.heldIndex(keycode)) |i| {
+                out.action = .repeat;
+                v.held[i].key = key;
+            } else if (v.held_len < v.held.len) {
+                v.held[v.held_len] = .{ .keycode = keycode, .key = key };
+                v.held_len += 1;
+            }
+        }
+        v.server.sendKey(v.session_id, v.block_id, out);
+    }
+
+    /// A key came up: if its press went to the program, so does its release.
+    pub fn releaseKey(v: *TermView, keycode: c_uint) void {
+        const i = v.heldIndex(keycode) orelse return;
+        var key = v.held[i].key;
+        v.held[i] = v.held[v.held_len - 1];
+        v.held_len -= 1;
+        // A release types nothing.
+        key.action = .release;
+        key.text_len = 0;
+        v.server.sendKey(v.session_id, v.block_id, key);
+    }
+
+    fn heldIndex(v: *const TermView, keycode: c_uint) ?usize {
+        for (v.held[0..v.held_len], 0..) |h, i| if (h.keycode == keycode) return i;
+        return null;
+    }
+
+    /// The keyboard's number for the key whose press is being handled right now, or 0: text
+    /// typed by an input method on its own time has no one key behind it.
+    fn pressedKeycode(v: *const TermView) c_uint {
+        const ctl = v.key_ctl orelse return 0;
+        const event = ctl.as(gtk.EventController).getCurrentEvent() orelse return 0;
+        if (event.getEventType() != .key_press) return 0;
+        const key_event: *gdk.KeyEvent = @ptrCast(event);
+        return key_event.getKeycode();
+    }
+
+    /// Left or right Ctrl. The key's own press doesn't yet count it among the modifiers held.
+    fn isCtrlKey(keyval: c_uint) bool {
+        return keyval == 0xffe3 or keyval == 0xffe4;
     }
 
     /// On a layout without Latin letters, Ctrl+C arrives as Ctrl+с, which no program or binding
@@ -971,7 +1067,7 @@ pub const TermView = struct {
         const key = keys.fromGdk(keyval, gdk.keyvalToUnicode(keyval), mods) orelse return 0;
         v.scrollToBottom();
         if (v.term()) |t| t.clearSelection();
-        v.server.sendKey(v.session_id, v.block_id, key);
+        v.sendPress(key, v.event_keycode);
         return 1;
     }
 
@@ -1147,7 +1243,10 @@ pub const TermView = struct {
         if (v.term()) |tm| tm.clearSelection();
         const view = std.unicode.Utf8View.init(rest) catch return v.server.paste(v.session_id, v.block_id, rest);
         var it = view.iterator();
-        while (it.nextCodepoint()) |cp| v.server.sendKey(v.session_id, v.block_id, keys.forChar(cp, 0));
+        // One character typed by one key press is that key's press: it can repeat and be
+        // released. Anything else (a composed character, a word from an input method) is text.
+        const keycode: c_uint = if ((std.unicode.utf8CountCodepoints(rest) catch 0) == 1) v.pressedKeycode() else 0;
+        while (it.nextCodepoint()) |cp| v.sendPress(keys.forChar(cp, 0), keycode);
     }
 
     fn onDrop(_: *gtk.DropTarget, value: *const gobject.Value, _: f64, _: f64, v: *TermView) callconv(.c) c_int {
@@ -1263,12 +1362,8 @@ pub const TermView = struct {
         // Programs that take the mouse, or use the whole screen, scroll themselves: by lines,
         // at the cell under the pointer. A touchpad reports pixels, which become lines here.
         if (t.frame.mouse or t.frame.alt_screen) {
-            v.scroll_rest += if (ctl.getUnit() == .surface) dy * settings.current.scroll_speed / v.cell_h else dy;
-            const lines = @trunc(v.scroll_rest);
-            if (lines == 0) return 1;
-            v.scroll_rest -= lines;
-            const cell = v.cellAt(v.pointer[0], v.pointer[1]);
-            v.server.sendWheel(v.session_id, v.block_id, lines, @min(cell[0], t.frame.cols -| 1), @min(cell[1], t.frame.rows -| 1), keys.modsString(mods));
+            v.coast_rows_per_second = 0;
+            v.wheelToProgram(t, if (ctl.getUnit() == .surface) dy * settings.current.scroll_speed / v.cell_h else dy, mods);
             return 1;
         }
         v.scroll_velocity = 0;
@@ -1287,13 +1382,53 @@ pub const TermView = struct {
         return 1;
     }
 
-    fn onMotion(_: *gtk.EventControllerMotion, x: f64, y: f64, v: *TermView) callconv(.c) void {
+    fn onMotion(motion: *gtk.EventControllerMotion, x: f64, y: f64, v: *TermView) callconv(.c) void {
         v.pointer = .{ x, y };
+        v.pointer_in = true;
+        const held = modsNow(motion) & keys.ctrl != 0;
+        if (held or v.link_armed) v.armLink(held);
+    }
+
+    fn onLeave(_: *gtk.EventControllerMotion, v: *TermView) callconv(.c) void {
+        v.pointer_in = false;
+        if (v.link_armed) v.armLink(false);
+    }
+
+    /// Called when Ctrl goes down or up, and as the pointer moves with it held. Ctrl+click
+    /// opens the link under the pointer, so while Ctrl is held that link is shown as one.
+    fn armLink(v: *TermView, ctrl: bool) void {
+        var armed = ctrl and v.pointer_in;
+        var hand = false;
+        if (armed) {
+            if (v.term()) |t| {
+                // A program that takes the mouse gets the click, so nothing would open.
+                if (t.frame.mouse and !v.linksOpenHere()) {
+                    armed = false;
+                } else {
+                    const cell = v.cellAt(v.pointer[0], v.pointer[1]);
+                    if (v.linkAt(t, cell[0], cell[1])) |url| {
+                        gpa.free(url);
+                        hand = true;
+                    }
+                }
+            } else armed = false;
+        }
+        if (hand != v.link_hand) {
+            v.link_hand = hand;
+            v.widget().setCursorFromName(if (hand) "pointer" else "text");
+        }
+        if (armed or v.link_armed) v.widget().queueDraw();
+        v.link_armed = armed;
     }
 
     /// A touchpad flick carries on, slowing down.
     fn onDecelerate(_: *gtk.EventControllerScroll, _: f64, vy: f64, v: *TermView) callconv(.c) void {
         const t = v.term() orelse return;
+        if (followsFingers(t)) {
+            v.coast_rows_per_second = vy * settings.current.scroll_speed / v.cell_h;
+            v.startGlideTick();
+            return;
+        }
         if (t.frame.mouse or t.frame.alt_screen) return;
         v.scroll_velocity = -vy * settings.current.scroll_speed;
         v.startScrollTick();
@@ -1344,6 +1479,112 @@ pub const TermView = struct {
             return 0;
         }
         return 1;
+    }
+
+    fn followsFingers(t: *const term_mod.Term) bool {
+        return settings.current.program_scroll_glide and t.frame.alt_screen;
+    }
+
+    fn wheelToProgram(v: *TermView, t: *term_mod.Term, rows: f64, mods: u4) void {
+        const following = followsFingers(t);
+        const a_step: f64 = if (following) v.glide_rows_a_step else 1;
+        v.scroll_rest += rows;
+        const whole = v.scroll_rest / a_step;
+        const steps = if (!following) @trunc(whole) else if (rows > 0) @ceil(whole) else if (rows < 0) @floor(whole) else 0;
+        if (steps != 0) {
+            v.scroll_rest -= steps * a_step;
+            const cell = v.cellAt(v.pointer[0], v.pointer[1]);
+            const col = @min(cell[0], t.frame.cols -| 1);
+            const row = @min(cell[1], t.frame.rows -| 1);
+            if (following) {
+                var left = @abs(steps);
+                while (left >= 1) : (left -= 1) v.server.sendWheel(v.session_id, v.block_id, std.math.sign(steps), col, row, keys.modsString(mods));
+            } else v.server.sendWheel(v.session_id, v.block_id, steps, col, row, keys.modsString(mods));
+        }
+        if (!following) return;
+        const now = glib.getMonotonicTime();
+        v.glide_wheel_us = now;
+        if (steps != 0) {
+            v.glide_armed_until = now + glide_armed_us;
+            v.glide_direction = if (steps > 0) .up else .down;
+            v.glide_steps_unanswered += steps;
+            v.glide_unanswered += steps * a_step;
+            v.glide_asked_us = now;
+        }
+        v.aimGlide();
+        v.startGlideTick();
+    }
+
+    fn aimGlide(v: *TermView) void {
+        v.glide.target = -(v.scroll_rest + v.glide_unanswered) * v.cell_h;
+    }
+
+    fn answered(v: *TermView, rows: isize) void {
+        const moved: f64 = @floatFromInt(rows);
+        if (v.glide_unanswered * moved <= 0) return;
+        const way = std.math.sign(moved);
+        const waiting = @max(1, @abs(v.glide_steps_unanswered));
+        const steps = std.math.clamp(@round(@abs(moved) / v.glide_rows_a_step), 1, waiting);
+        v.scroll_rest -= moved - steps * v.glide_rows_a_step * way;
+        v.glide_steps_unanswered -= steps * way;
+        if (waiting == 1) {
+            const a_step = std.math.clamp(@abs(moved), 1, most_rows_a_step);
+            if (perf_log and a_step != v.glide_rows_a_step) std.log.info("glide: {d} rows a step", .{a_step});
+            v.glide_rows_a_step = a_step;
+        }
+        v.glide_unanswered = v.glide_steps_unanswered * v.glide_rows_a_step;
+        v.aimGlide();
+    }
+
+    pub fn picture(v: *TermView, scale: f32) ?*gsk.RenderNode {
+        const own = gtk.Snapshot.new();
+        own.scale(scale, scale);
+        snapshotTermImpl(v, own);
+        return own.freeToNode();
+    }
+
+    pub fn coastBy(v: *TermView, rows_per_second: f64) void {
+        const t = v.term() orelse return;
+        if (!followsFingers(t)) return;
+        v.pointer = .{ @as(f64, @floatFromInt(v.widget().getWidth())) / 2, @as(f64, @floatFromInt(v.widget().getHeight())) / 2 };
+        v.coast_rows_per_second = rows_per_second;
+        v.startGlideTick();
+    }
+
+    pub fn wheelBy(v: *TermView, rows: f64) void {
+        const t = v.term() orelse return;
+        v.pointer = .{ @as(f64, @floatFromInt(v.widget().getWidth())) / 2, @as(f64, @floatFromInt(v.widget().getHeight())) / 2 };
+        if (t.frame.mouse or t.frame.alt_screen) v.wheelToProgram(t, rows, 0);
+    }
+
+    fn startGlideTick(v: *TermView) void {
+        if (v.glide_tick != 0) return;
+        v.glide_frame_us = 0;
+        v.glide_tick = v.widget().addTickCallback(&glideTick, v, null);
+    }
+
+    fn glideTick(_: *gtk.Widget, clock: *gdk.FrameClock, data: ?*anyopaque) callconv(.c) c_int {
+        const v: *TermView = @ptrCast(@alignCast(data.?));
+        const now = clock.getFrameTime();
+        const seconds: f64 = if (v.glide_frame_us == 0) 1.0 / 60.0 else @min(0.05, @as(f64, @floatFromInt(now - v.glide_frame_us)) / 1e6);
+        v.glide_frame_us = now;
+        const clock_now = glib.getMonotonicTime();
+        if (v.coast_rows_per_second != 0) {
+            if (v.term()) |t| v.wheelToProgram(t, v.coast_rows_per_second * seconds, 0);
+            v.coast_rows_per_second *= std.math.pow(f64, coast_fade_per_second, seconds);
+            if (@abs(v.coast_rows_per_second) * v.cell_h < coast_slowest_px_per_second) v.coast_rows_per_second = 0;
+        }
+        if (v.glide_unanswered != 0 and clock_now - v.glide_asked_us > glide_unanswered_us) {
+            v.glide_unanswered = 0;
+            v.glide_steps_unanswered = 0;
+        }
+        if (v.coast_rows_per_second == 0 and clock_now - v.glide_wheel_us > glide_fingers_gone_us) v.scroll_rest = 0;
+        v.aimGlide();
+        const easing = v.glide.ease(seconds, v.cell_h);
+        v.widget().queueDraw();
+        if (easing or v.coast_rows_per_second != 0 or v.scroll_rest != 0 or v.glide_unanswered != 0) return 1;
+        v.glide_tick = 0;
+        return 0;
     }
 
     /// Output that arrives while looking back through history shouldn't move what's shown.
@@ -1405,6 +1646,8 @@ pub const TermView = struct {
         const mods = modsNow(gesture);
         const cell = v.cellAt(x, y);
         const button = gesture.as(gtk.GestureSingle).getCurrentButton();
+        // The release opens the link here, so the program never hears of the click.
+        if (button == 1 and v.keepsLinkClick(t, mods, cell)) return;
         if (v.programHasMouse(mods)) {
             v.held_button = buttonName(gesture);
             v.last_motion = cell;
@@ -1437,6 +1680,13 @@ pub const TermView = struct {
         const t = v.term() orelse return;
         const mods = modsNow(gesture);
         const cell = v.cellAt(x, y);
+        if (gesture.as(gtk.GestureSingle).getCurrentButton() == 1 and v.keepsLinkClick(t, mods, cell)) {
+            if (v.linkAt(t, cell[0], cell[1])) |url| {
+                defer gpa.free(url);
+                v.openLink(url);
+            }
+            return;
+        }
         if (v.programHasMouse(mods)) {
             v.server.sendMouse(v.session_id, v.block_id, "release", buttonName(gesture), cell[0], cell[1], keys.modsString(mods));
             return;
@@ -1454,10 +1704,38 @@ pub const TermView = struct {
         v.widget().queueDraw();
     }
 
+    /// Whether the pane shows another computer: anything not reached through a socket here.
+    fn onRemoteHost(v: *const TermView) bool {
+        return !std.mem.startsWith(u8, v.server.url, "unix://");
+    }
+
+    /// Whether Ctrl+click on a link is Renux's to open even though the program in the pane
+    /// takes the mouse. Given the click, a program on a remote host opens the link in a
+    /// browser on that host, where nobody is looking. On this computer the program keeps it.
+    fn linksOpenHere(v: *const TermView) bool {
+        return settings.current.remote_links_here and v.onRemoteHost();
+    }
+
+    /// Whether a Ctrl+click at a cell is kept from a program that takes the mouse, to open the
+    /// link there on this computer.
+    fn keepsLinkClick(v: *TermView, t: *term_mod.Term, mods: u4, cell: struct { u16, u16 }) bool {
+        if (mods & keys.ctrl == 0 or !v.programHasMouse(mods) or !v.linksOpenHere()) return false;
+        const url = v.linkAt(t, cell[0], cell[1]) orelse return false;
+        gpa.free(url);
+        return true;
+    }
+
     /// The link at a cell: an OSC 8 hyperlink, or a web address written in the text.
     fn linkAt(v: *TermView, t: *term_mod.Term, col: u16, row: u16) ?[:0]u8 {
         _ = v;
         if (t.hyperlinkAt(col, row)) |u| return u;
+        var link = textLinkAt(t, col, row) orelse return null;
+        defer link.deinit(gpa);
+        return gpa.dupeSentinel(u8, link.url, 0) catch null;
+    }
+
+    /// The web address written in the text at a cell, with the cells it covers.
+    fn textLinkAt(t: *term_mod.Term, col: u16, row: u16) ?links.Link {
         const f = &t.frame;
         var rows: std.ArrayList([]u21) = .empty;
         defer {
@@ -1476,9 +1754,23 @@ pub const TermView = struct {
             };
         }
         const casted: []const []const u21 = @ptrCast(rows.items);
-        var link = (links.at(gpa, casted, f.wraps.items, col, row) catch return null) orelse return null;
+        return links.at(gpa, casted, f.wraps.items, col, row) catch null;
+    }
+
+    /// Underlines the web address under the pointer while Ctrl is held. A hyperlink a program
+    /// marked as one is underlined already.
+    fn drawArmedLink(v: *TermView, sn: *gtk.Snapshot, t: *term_mod.Term, frac: f64) void {
+        const f = &t.frame;
+        const cell = v.cellAt(v.pointer[0], v.pointer[1]);
+        if (cell[0] >= f.cols or cell[1] >= f.rows or f.cell(cell[0], cell[1]).flags.link) return;
+        var link = textLinkAt(t, cell[0], cell[1]) orelse return;
         defer link.deinit(gpa);
-        return gpa.dupeSentinel(u8, link.url, 0) catch null;
+        for (link.segments.items) |seg| {
+            if (seg.row >= f.rows or seg.start >= f.cols) continue;
+            const top = pad_y + frac + @as(f64, @floatFromInt(seg.row)) * v.cell_h;
+            const color = cellColors(f, f.cell(seg.start, seg.row)).fg;
+            fillRect(sn, color, 1, pad_x + @as(f64, @floatFromInt(seg.start)) * v.cell_w, top + v.baseline + 1.5, @as(f64, @floatFromInt(seg.end + 1 - seg.start)) * v.cell_w, 1);
+        }
     }
 
     fn onDragBegin(gesture: *gtk.GestureDrag, x: f64, y: f64, v: *TermView) callconv(.c) void {
@@ -1820,6 +2112,8 @@ pub const TermView = struct {
     }
 
     fn onFocusOut(_: *gtk.EventControllerFocus, v: *TermView) callconv(.c) void {
+        // Keys still down come up for the program now: their real release goes elsewhere.
+        while (v.held_len > 0) v.releaseKey(v.held[0].keycode);
         // Composing doesn't carry over to another pane: what was unfinished is dropped.
         v.im.as(gtk.IMContext).reset();
         v.im.as(gtk.IMContext).focusOut();
@@ -1856,10 +2150,16 @@ fn drawImages(v: *TermView, sn: *gtk.Snapshot, t: *term_mod.Term, above: bool, f
     for (t.images.items) |im| {
         if (im.above_text != above or im.sw == 0 or im.sh == 0 or im.width == 0 or im.height == 0) continue;
         const tex = v.textureFor(t, im) orelse continue;
-        const x = pad_x + @as(f64, @floatFromInt(im.col)) * v.cell_w + @as(f64, @floatFromInt(im.off_x));
-        const y = pad_y + frac + @as(f64, @floatFromInt(im.row)) * v.cell_h + @as(f64, @floatFromInt(im.off_y));
-        const dw: f64 = @floatFromInt(im.width);
-        const dh: f64 = @floatFromInt(im.height);
+        // An image placed with placeholder characters comes as one strip per row of text. Each
+        // strip's edges are moved onto the screen's pixels, so two strips share an edge exactly
+        // and nothing shows through between them.
+        const left = pad_x + @as(f64, @floatFromInt(im.col)) * v.cell_w + @as(f64, @floatFromInt(im.off_x));
+        const top = pad_y + frac + @as(f64, @floatFromInt(im.row)) * v.cell_h + @as(f64, @floatFromInt(im.off_y));
+        const x = pixelX(v, left);
+        const y = pixelY(v, top);
+        const dw = pixelX(v, left + @as(f64, @floatFromInt(im.width))) - x;
+        const dh = pixelY(v, top + @as(f64, @floatFromInt(im.height))) - y;
+        if (dw <= 0 or dh <= 0) continue;
         // The source rectangle fills the destination, so the whole image is scaled to match.
         const scale_x = dw / @as(f64, @floatFromInt(im.sw));
         const scale_y = dh / @as(f64, @floatFromInt(im.sh));
@@ -1875,6 +2175,8 @@ fn drawImages(v: *TermView, sn: *gtk.Snapshot, t: *term_mod.Term, above: bool, f
 }
 
 const TextureEntry = struct { key: u64, texture: *gdk.Texture };
+
+const HeldKey = struct { keycode: c_uint, key: keys.Key };
 
 fn imageKey(im: term_mod.Image) u64 {
     return (@as(u64, im.id) << 32) ^ im.generation;
@@ -2060,8 +2362,38 @@ fn buildRow(v: *TermView, f: *const term_mod.Frame, y: usize, f_font: Font) ?*gs
             x += 1;
             continue;
         }
+        // Block characters are filled each frame by `drawBlocks`, not kept with the row.
+        if (boxdraw.isBlock(cl.cp)) {
+            x += 1;
+            continue;
+        }
         if (boxdraw.handles(cl.cp)) {
             const left = pad_x + @as(f64, @floatFromInt(x)) * v.cell_w;
+            const color = cellColors(f, cl).fg;
+            const alpha: f64 = if (cl.flags.faint) 0.6 else 1;
+            // A run of one horizontal line is drawn as one stroke.
+            var run: usize = 1;
+            if (boxdraw.isHorizontal(cl.cp)) {
+                while (x + run < f.cols) : (run += 1) {
+                    const n = f.cell(x + run, y);
+                    if (n.cp != cl.cp or n.flags.faint != cl.flags.faint or n.flags.invisible or cellColors(f, n).fg != color) break;
+                }
+            }
+            const width = @as(f64, @floatFromInt(run)) * v.cell_w;
+            var rects: [8]boxdraw.Rect = undefined;
+            if (boxdraw.lineRects(cl.cp, left, 0, width, v.cell_h, &rects)) |strokes| {
+                // Strokes that reach the cell's sides end on whole screen pixels, where the
+                // neighbouring cell's begin: no faint gap where two lines meet.
+                const snap_left = pixelX(v, left);
+                const snap_right = pixelX(v, left + width);
+                for (strokes) |r| {
+                    const x0 = if (r.x0 == left) snap_left else r.x0;
+                    const x1 = if (r.x1 == left + width) snap_right else r.x1;
+                    fillRect(sn, color, alpha, x0, r.y0, x1 - x0, r.y1 - r.y0);
+                }
+                x += run;
+                continue;
+            }
             const cr = sn.appendCairo(&.{ .f_origin = .{ .f_x = @floatCast(left - 1), .f_y = 0 }, .f_size = .{ .f_width = @floatCast(v.cell_w + 2), .f_height = @floatCast(v.cell_h) } });
             setColor(cr, cellColors(f, cl).fg, if (cl.flags.faint) 0.6 else 1);
             boxdraw.draw(cr, cl.cp, left, 0, v.cell_w, v.cell_h);
@@ -2100,7 +2432,92 @@ fn buildRow(v: *TermView, f: *const term_mod.Frame, y: usize, f_font: Font) ?*gs
 /// painted its own at a fractional height and both edges came out half drawn. With rounded
 /// selection on, a selection rounds only the corners with nothing selected beyond them, so the
 /// whole selection is rounded on its outside rather than each line of it.
-fn drawBackgrounds(v: *TermView, sn: *gtk.Snapshot, f: *const term_mod.Frame, top: f64, rows: usize, h: f64) void {
+/// Finds where the pane sits on the screen's pixels, for `pixelX` and `pixelY`.
+fn findPixels(v: *TermView) void {
+    v.pixel_origin = .{ 0, 0 };
+    v.pixel_scale = 1;
+    const w = v.widget();
+    const native = w.getNative() orelse return;
+    if (native.getSurface()) |surface| v.pixel_scale = surface.getScale();
+    if (shotScale()) |scale| v.pixel_scale = scale;
+    var at: graphene.Point = undefined;
+    if (w.computePoint(native.as(gtk.Widget), &.{ .f_x = 0, .f_y = 0 }, &at) == 0) return;
+    var dx: f64 = 0;
+    var dy: f64 = 0;
+    native.getSurfaceTransform(&dx, &dy);
+    v.pixel_origin = .{ at.f_x + dx, at.f_y + dy };
+}
+
+/// The scale a development screenshot is drawn at, when one is asked for: the hidden display
+/// it is taken on has a scale of its own, usually 1, and what is lined up with pixels has to
+/// be lined up with the screenshot's to be judged in it. Null outside development builds.
+pub fn shotScale() ?f64 {
+    if (!@import("build_options").dev) return null;
+    const text = std.c.getenv("RENUX_SHOT_SCALE") orelse return null;
+    const scale = std.fmt.parseFloat(f64, std.mem.span(text)) catch return null;
+    return std.math.clamp(scale, 1, 4);
+}
+
+/// A horizontal place in the pane, moved to the nearest edge between two screen pixels.
+/// Cells are rarely a whole number of pixels wide or tall, least of all on a screen scaled by
+/// a fraction. A filled cell whose edge falls inside a pixel covers that pixel only in part,
+/// and so does its neighbour: what is behind shows through, as a faint line between two
+/// blocks that should touch. With every edge on the pixel grid, neighbours share an edge
+/// exactly.
+fn pixelX(v: *const TermView, x: f64) f64 {
+    return @round((x + v.pixel_origin[0]) * v.pixel_scale) / v.pixel_scale - v.pixel_origin[0];
+}
+
+fn pixelY(v: *const TermView, y: f64) f64 {
+    return @round((y + v.pixel_origin[1]) * v.pixel_scale) / v.pixel_scale - v.pixel_origin[1];
+}
+
+/// Fills the block characters of some rows: halves, eighths, shades, quadrants and sextants,
+/// in the cell's text color. They are filled here, each frame, and not with the row's text,
+/// which is laid out once and kept: where a block's edges fall on the screen's pixels depends
+/// on where its row is now. A run of the same block in the same color is filled as one piece.
+fn drawBlocks(v: *TermView, sn: *gtk.Snapshot, f: *const term_mod.Frame, top: f64, from: usize, rows: usize, h: f64) void {
+    var parts_buf: [6]boxdraw.Part = undefined;
+    var y: usize = from;
+    while (y < @min(rows, f.rows)) : (y += 1) {
+        const row_top = top + @as(f64, @floatFromInt(y)) * v.cell_h;
+        if (row_top > h) break;
+        if (row_top + v.cell_h < 0) continue;
+        var x: usize = 0;
+        while (x < f.cols) {
+            const cl = f.cell(x, y);
+            if (!boxdraw.isBlock(cl.cp) or cl.flags.invisible) {
+                x += 1;
+                continue;
+            }
+            const color = cellColors(f, cl).fg;
+            const start = x;
+            x += 1;
+            while (x < f.cols) : (x += 1) {
+                const n = f.cell(x, y);
+                if (n.cp != cl.cp or n.flags.invisible or n.flags.faint != cl.flags.faint or cellColors(f, n).fg != color) break;
+            }
+            const strength: f64 = if (cl.flags.faint) 0.6 else 1;
+            for (boxdraw.blockParts(cl.cp, &parts_buf)) |part| {
+                const y0 = pixelY(v, row_top + part.y0 * v.cell_h);
+                const y1 = pixelY(v, row_top + part.y1 * v.cell_h);
+                // A part as wide as its cell joins its neighbours' into one strip; a narrower
+                // one is filled cell by cell.
+                const whole = part.x0 == 0 and part.x1 == 1;
+                var col = start;
+                while (col < x) : (col += 1) {
+                    const last = if (whole) x - 1 else col;
+                    const x0 = pixelX(v, pad_x + (@as(f64, @floatFromInt(col)) + part.x0) * v.cell_w);
+                    const x1 = pixelX(v, pad_x + (@as(f64, @floatFromInt(last)) + part.x1) * v.cell_w);
+                    fillRect(sn, color, strength * part.alpha, x0, y0, x1 - x0, y1 - y0);
+                    col = last;
+                }
+            }
+        }
+    }
+}
+
+fn drawBackgrounds(v: *TermView, sn: *gtk.Snapshot, f: *const term_mod.Frame, top: f64, from: usize, rows: usize, h: f64) void {
     const Shape = struct { color: u32, builder: *gsk.PathBuilder };
     var shapes: [24]Shape = undefined;
     var n_shapes: usize = 0;
@@ -2112,7 +2529,7 @@ fn drawBackgrounds(v: *TermView, sn: *gtk.Snapshot, f: *const term_mod.Frame, to
             return fr.cell(col, @intCast(row)).flags.selected;
         }
     };
-    var y: usize = 0;
+    var y: usize = from;
     while (y < @min(rows, f.rows)) : (y += 1) {
         const row_top = top + @as(f64, @floatFromInt(y)) * v.cell_h;
         if (row_top > h) break;
@@ -2126,13 +2543,18 @@ fn drawBackgrounds(v: *TermView, sn: *gtk.Snapshot, f: *const term_mod.Frame, to
             x += 1;
             while (x < f.cols and cellBg(f, f.cell(x, y)) == color and f.cell(x, y).flags.selected == sel) x += 1;
             if (color == f.bg and !sel) continue;
+            // The run's edges, on the screen's pixels so it meets its neighbours exactly.
+            const run_x0 = pixelX(v, pad_x + @as(f64, @floatFromInt(start)) * v.cell_w);
+            const run_x1 = pixelX(v, pad_x + @as(f64, @floatFromInt(x)) * v.cell_w);
+            const run_y0 = pixelY(v, row_top);
+            const run_y1 = pixelY(v, row_top + v.cell_h);
             // Its color's shape, made the first time the color comes up.
             const shape = for (shapes[0..n_shapes]) |*sh| {
                 if (sh.color == color) break sh;
             } else blk: {
                 if (n_shapes == shapes.len) {
                     // So many colors that a shape each would cost more than it saves.
-                    fillRect(sn, color, 1, pad_x + @as(f64, @floatFromInt(start)) * v.cell_w, row_top, @as(f64, @floatFromInt(x - start)) * v.cell_w + 0.5, v.cell_h + 0.5);
+                    fillRect(sn, color, 1, run_x0, run_y0, run_x1 - run_x0, run_y1 - run_y0);
                     continue;
                 }
                 shapes[n_shapes] = .{ .color = color, .builder = gsk.PathBuilder.new() };
@@ -2140,8 +2562,8 @@ fn drawBackgrounds(v: *TermView, sn: *gtk.Snapshot, f: *const term_mod.Frame, to
                 break :blk &shapes[n_shapes - 1];
             };
             const rect: graphene.Rect = .{
-                .f_origin = .{ .f_x = @floatCast(pad_x + @as(f64, @floatFromInt(start)) * v.cell_w), .f_y = @floatCast(row_top) },
-                .f_size = .{ .f_width = @floatCast(@as(f64, @floatFromInt(x - start)) * v.cell_w), .f_height = @floatCast(v.cell_h + 0.05) },
+                .f_origin = .{ .f_x = @floatCast(run_x0), .f_y = @floatCast(run_y0) },
+                .f_size = .{ .f_width = @floatCast(run_x1 - run_x0), .f_height = @floatCast(run_y1 - run_y0) },
             };
             if (!(rounded and sel)) {
                 shape.builder.addRect(&rect);
@@ -2393,6 +2815,7 @@ fn placeRow(sn: *gtk.Snapshot, node: ?*gsk.RenderNode, top: f64) void {
 /// hidden and the cells the text left are empty, so the terminal's own background shows behind it, not the text and its
 /// selection. The cache of drawn rows keys on the cells, so it stays right.
 fn renderFrame(v: *TermView, t: *term_mod.Term) void {
+    t.honor_hold = settings.current.program_scroll_glide and t.frame.alt_screen;
     _ = t.render(true);
     // Where the text is now is known only once the terminal is read, so a lift whose text has
     // moved ends here, before its cells are emptied, not a frame late.
@@ -2408,6 +2831,19 @@ fn renderFrame(v: *TermView, t: *term_mod.Term) void {
         var x = s.x0;
         while (x < s.x1 and x < f.cols) : (x += 1) f.cells.items[@as(usize, s.row) * f.cols + x] = .{};
     }
+}
+
+fn drawGrid(v: *TermView, sn: *gtk.Snapshot, t: *term_mod.Term, f: *const term_mod.Frame, f_font: Font, frac: f64, h: f64) void {
+    drawBackgrounds(v, sn, f, pad_y + frac, 0, f.rows, h);
+    drawImages(v, sn, t, false, frac);
+    drawBlocks(v, sn, f, pad_y + frac, 0, f.rows, h);
+    var y: usize = 0;
+    while (y < f.rows) : (y += 1) {
+        const top = pad_y + frac + @as(f64, @floatFromInt(y)) * v.cell_h;
+        if (top > h) break;
+        placeRow(sn, rowNode(v, y, f, y, f_font), top);
+    }
+    drawImages(v, sn, t, true, frac);
 }
 
 pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
@@ -2441,6 +2877,7 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     renderFrame(v, t);
     const f = &t.frame;
     const f_font = v.fontOf() orelse return;
+    findPixels(v);
     v.shader_look.bg = f.bg;
     v.shader_look.bg_alpha = @floatCast(term_opacity);
     v.shader_look.fg = f.fg;
@@ -2469,23 +2906,53 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
         for (v.rows_prev.items) |e| if (e.node) |n| n.unref();
         v.rows_prev.clearRetainingCapacity();
     }
-    if (frac > 0.01 and rows_up < max_up) {
+    // While looking back through history, the lines just outside the rows are drawn too, as
+    // much of each as shows: the one above in the gap at the top, and the one below in what is
+    // left of the pane under the last row. A line leaves by sliding out past the edge, cut
+    // where the pane ends, not by vanishing the moment it no longer fits whole.
+    const in_history = v.scroll_px > 0.01;
+    if (in_history and rows_up < max_up and pad_y + frac > 0.01) {
         t.scroll(-1);
         _ = t.render(true);
-        drawBackgrounds(v, sn, &t.frame, pad_y + frac - v.cell_h, 1, h);
+        drawBackgrounds(v, sn, &t.frame, pad_y + frac - v.cell_h, 0, 1, h);
+        drawBlocks(v, sn, &t.frame, pad_y + frac - v.cell_h, 0, 1, h);
         placeRow(sn, rowNode(v, t.frame.rows, &t.frame, 0, f_font), pad_y + frac - v.cell_h);
         t.scroll(1);
         renderFrame(v, t);
     }
-    drawBackgrounds(v, sn, f, pad_y + frac, f.rows, h);
-    drawImages(v, sn, t, false, frac);
-    var y: usize = 0;
-    while (y < f.rows) : (y += 1) {
-        const top = pad_y + frac + @as(f64, @floatFromInt(y)) * v.cell_h;
-        if (top > h) break;
-        placeRow(sn, rowNode(v, y, f, y, f_font), top);
+    const below_top = pad_y + frac + @as(f64, @floatFromInt(f.rows)) * v.cell_h;
+    if (in_history and rows_up >= 1 and below_top < h and f.rows > 0) {
+        // One row on, the line below is the last of the rows read.
+        const rows = f.rows;
+        t.scroll(1);
+        _ = t.render(true);
+        if (t.frame.rows == rows) {
+            const first_top = below_top - @as(f64, @floatFromInt(rows - 1)) * v.cell_h;
+            drawBackgrounds(v, sn, &t.frame, first_top, rows - 1, rows, h);
+            drawBlocks(v, sn, &t.frame, first_top, rows - 1, rows, h);
+            placeRow(sn, rowNode(v, rows + 1, &t.frame, rows - 1, f_font), below_top);
+        }
+        t.scroll(-1);
+        renderFrame(v, t);
     }
-    drawImages(v, sn, t, true, frac);
+    if (settings.current.program_scroll_glide and f.alt_screen) {
+        if (v.glide.observe(f, if (glib.getMonotonicTime() < v.glide_armed_until) v.glide_direction else null, v.cell_h)) |shift| {
+            v.answered(shift.rows);
+            if (perf_log) std.log.info("glide: {d} rows in {d}..{d}", .{ shift.rows, shift.band.top, shift.band.bottom });
+        }
+        const own = gtk.Snapshot.new();
+        drawGrid(v, own, t, f, f_font, frac, h);
+        const grid = own.freeToNode();
+        if (grid) |g| {
+            if (v.glide.moving()) v.glide.draw(sn, g, .{ .w = w, .h = h, .pad_x = pad_x, .pad_y = pad_y, .cell_w = v.cell_w, .cell_h = v.cell_h, .px = .{ .origin = v.pixel_origin[1], .scale = v.pixel_scale }, .fill_alpha = term_opacity }) else sn.appendNode(g);
+        }
+        v.glide.keep(grid);
+        if (v.glide.moving()) v.startGlideTick();
+    } else {
+        v.glide.forget();
+        drawGrid(v, sn, t, f, f_font, frac, h);
+    }
+    if (v.link_armed) v.drawArmedLink(sn, t, frac);
 
     // Search matches, over the text.
     if (t.finding()) {
@@ -2518,7 +2985,7 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     // The cursor, hollow when the pane doesn't have the keyboard.
     if (f.cursor_visible and f.cursor_y < f.rows and f.cursor_x < f.cols and f.scroll_offset + f.scroll_len >= f.scroll_total) {
         const cx = pad_x + @as(f64, @floatFromInt(f.cursor_x)) * v.cell_w;
-        const cy = pad_y + @as(f64, @floatFromInt(f.cursor_y)) * v.cell_h;
+        const cy = pad_y + @as(f64, @floatFromInt(f.cursor_y)) * v.cell_h + v.glide.cursorShift(.{ .origin = v.pixel_origin[1], .scale = v.pixel_scale });
         // A program's own cursor color wins; otherwise the theme's accent, like Rex.
         const color = if (f.cursor_color != 0 and f.cursor_color != f.fg) f.cursor_color else if (cursor_accent != 0) cursor_accent else f.fg;
         const focused = v.widget().hasFocus() != 0;

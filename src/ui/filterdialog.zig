@@ -29,7 +29,7 @@ pub fn build(title: [:0]const u8, placeholder: [:0]const u8, width: c_int, heigh
     list.as(gtk.Widget).addCssClass("navigation-sidebar");
     list.setActivateOnSingleClick(1);
     const scroller = gtk.ScrolledWindow.new();
-    scroller.setPolicy(.never, .automatic);
+    scroller.setPolicy(.never, .external);
     scroller.as(gtk.Widget).setVexpand(1);
     scroller.setChild(list.as(gtk.Widget));
     box.append(scroller.as(gtk.Widget));

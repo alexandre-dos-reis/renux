@@ -993,11 +993,7 @@ pub const Overview = struct {
     }
 
     fn screenScale(o: *Overview) f64 {
-        // A development screenshot is drawn larger than the hidden display it is taken on, and
-        // the pictures have to be as sharp as the screenshot to be judged in it.
-        if (@import("build_options").dev) if (std.c.getenv("RENUX_SHOT_SCALE")) |text| {
-            if (std.fmt.parseFloat(f64, std.mem.span(text))) |scale| return std.math.clamp(scale, 1, 4) else |_| {}
-        };
+        if (@import("../terminal/termview.zig").shotScale()) |scale| return scale;
         const native = o.widget().getNative() orelse return 1;
         return if (native.getSurface()) |s| s.getScale() else 1;
     }
