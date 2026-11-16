@@ -122,4 +122,5 @@ test {
     _ = @import("rex/tailscale.zig");
     _ = @import("util/qr.zig");
     _ = @import("terminal/shader.zig");
+    _ = @import("terminal/glide.zig");
 }

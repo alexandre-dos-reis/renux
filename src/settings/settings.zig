@@ -115,6 +115,9 @@ pub const Settings = struct {
     copy_animation: bool = true,
     /// The agent board lists each column's cards under their sessions' names.
     board_by_session: bool = false,
+    agent_board: bool = false,
+    overview: bool = false,
+    program_scroll_glide: bool = false,
     /// Link schemes, such as vscode, that open their app without asking.
     trusted_schemes: std.ArrayList([]u8) = .empty,
     tab_position: TabPosition = .left,

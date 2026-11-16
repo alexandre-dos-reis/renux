@@ -70,7 +70,7 @@ pub fn build(b: *std.Build) void {
     // The entry names the program by its full path: a desktop's own PATH often leaves out
     // ~/.local/bin, where a build installed with `-p ~/.local` puts it.
     const desktop = b.addSystemCommand(&.{ "sed", "-e" });
-    desktop.addDirectoryArg2(.{ .relative = .{ .base = .deployed_bin } }, .{ .prefix = "s|^Exec=renux$|Exec=", .suffix = "/renux|", .make_absolute = true });
+    desktop.addDirectoryArg2(.{ .relative = .{ .base = .install_bin } }, .{ .prefix = "s|^Exec=renux$|Exec=", .suffix = "/renux|", .make_absolute = true });
     desktop.addFileArg(b.path("data/dev.renux.desktop"));
     const desktop_file = desktop.captureStdOut(.{ .basename = "dev.renux.desktop" });
     b.getInstallStep().dependOn(&b.addInstallFile(desktop_file, "share/applications/dev.renux.desktop").step);

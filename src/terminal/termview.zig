@@ -28,6 +28,7 @@ const shader = @import("shader.zig");
 const fonts = @import("fonts.zig");
 const upload_ui = @import("../ui/upload.zig");
 const peek = @import("../ui/peek.zig");
+const glide_mod = @import("glide.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -268,6 +269,12 @@ pub var pad_y: f64 = 8;
 /// The theme's own background, for padding drawn in the theme's color.
 pub var theme_bg: u32 = 0;
 const size_debounce_ms = 200;
+const glide_armed_us = 400_000;
+const glide_unanswered_us = 250_000;
+const glide_fingers_gone_us = 300_000;
+const coast_fade_per_second = 0.05;
+const most_rows_a_step = 8.0;
+const coast_slowest_px_per_second = 15.0;
 
 pub const Font = struct {
     regular: *pango.FontDescription,
@@ -684,6 +691,17 @@ pub const TermView = struct {
     scroll_target: f64 = 0,
     scroll_velocity: f64 = 0,
     scroll_tick: c_uint = 0,
+    glide: glide_mod.Glide = .{},
+    glide_armed_until: i64 = 0,
+    glide_direction: glide_mod.Direction = .either,
+    glide_tick: c_uint = 0,
+    glide_frame_us: i64 = 0,
+    glide_unanswered: f64 = 0,
+    glide_steps_unanswered: f64 = 0,
+    glide_rows_a_step: f64 = 1,
+    glide_asked_us: i64 = 0,
+    glide_wheel_us: i64 = 0,
+    coast_rows_per_second: f64 = 0,
     /// The pane's textures for a custom shader, and the tick that redraws it while the shader
     /// moves with time.
     shader_pane: shader.Pane = .{},
@@ -978,6 +996,8 @@ pub const TermView = struct {
             v.widget().removeTickCallback(v.scroll_tick);
             scroll_ticking -= 1;
         }
+        if (v.glide_tick != 0) v.widget().removeTickCallback(v.glide_tick);
+        v.glide.forget();
         if (v.shader_view) |sv| {
             if (v.shader_tick != 0) sv.as(gtk.Widget).removeTickCallback(v.shader_tick);
             sv.view = null;
@@ -1750,12 +1770,8 @@ pub const TermView = struct {
         // Programs that take the mouse, or use the whole screen, scroll themselves: by lines,
         // at the cell under the pointer. A touchpad reports pixels, which become lines here.
         if (t.frame.mouse or t.frame.alt_screen) {
-            v.scroll_rest += if (ctl.getUnit() == .surface) dy * settings.current.scroll_speed / v.cell_h else dy;
-            const lines = @trunc(v.scroll_rest);
-            if (lines == 0) return 1;
-            v.scroll_rest -= lines;
-            const cell = v.cellAt(v.pointer[0], v.pointer[1]);
-            v.server.sendWheel(v.session_id, v.block_id, lines, @min(cell[0], t.frame.cols -| 1), @min(cell[1], t.frame.rows -| 1), keys.modsString(mods));
+            v.coast_rows_per_second = 0;
+            v.wheelToProgram(t, if (ctl.getUnit() == .surface) dy * settings.current.scroll_speed / v.cell_h else dy, mods);
             return 1;
         }
         v.scroll_velocity = 0;
@@ -1814,6 +1830,11 @@ pub const TermView = struct {
     /// A touchpad flick carries on, slowing down.
     fn onDecelerate(_: *gtk.EventControllerScroll, _: f64, vy: f64, v: *TermView) callconv(.c) void {
         const t = v.term() orelse return;
+        if (followsFingers(t)) {
+            v.coast_rows_per_second = vy * settings.current.scroll_speed / v.cell_h;
+            v.startGlideTick();
+            return;
+        }
         if (t.frame.mouse or t.frame.alt_screen) return;
         v.scroll_velocity = -vy * settings.current.scroll_speed;
         v.startScrollTick();
@@ -1864,6 +1885,112 @@ pub const TermView = struct {
             return 0;
         }
         return 1;
+    }
+
+    fn followsFingers(t: *const term_mod.Term) bool {
+        return settings.current.program_scroll_glide and t.frame.alt_screen;
+    }
+
+    fn wheelToProgram(v: *TermView, t: *term_mod.Term, rows: f64, mods: u4) void {
+        const following = followsFingers(t);
+        const a_step: f64 = if (following) v.glide_rows_a_step else 1;
+        v.scroll_rest += rows;
+        const whole = v.scroll_rest / a_step;
+        const steps = if (!following) @trunc(whole) else if (rows > 0) @ceil(whole) else if (rows < 0) @floor(whole) else 0;
+        if (steps != 0) {
+            v.scroll_rest -= steps * a_step;
+            const cell = v.cellAt(v.pointer[0], v.pointer[1]);
+            const col = @min(cell[0], t.frame.cols -| 1);
+            const row = @min(cell[1], t.frame.rows -| 1);
+            if (following) {
+                var left = @abs(steps);
+                while (left >= 1) : (left -= 1) v.server.sendWheel(v.session_id, v.block_id, std.math.sign(steps), col, row, keys.modsString(mods));
+            } else v.server.sendWheel(v.session_id, v.block_id, steps, col, row, keys.modsString(mods));
+        }
+        if (!following) return;
+        const now = glib.getMonotonicTime();
+        v.glide_wheel_us = now;
+        if (steps != 0) {
+            v.glide_armed_until = now + glide_armed_us;
+            v.glide_direction = if (steps > 0) .up else .down;
+            v.glide_steps_unanswered += steps;
+            v.glide_unanswered += steps * a_step;
+            v.glide_asked_us = now;
+        }
+        v.aimGlide();
+        v.startGlideTick();
+    }
+
+    fn aimGlide(v: *TermView) void {
+        v.glide.target = -(v.scroll_rest + v.glide_unanswered) * v.cell_h;
+    }
+
+    fn answered(v: *TermView, rows: isize) void {
+        const moved: f64 = @floatFromInt(rows);
+        if (v.glide_unanswered * moved <= 0) return;
+        const way = std.math.sign(moved);
+        const waiting = @max(1, @abs(v.glide_steps_unanswered));
+        const steps = std.math.clamp(@round(@abs(moved) / v.glide_rows_a_step), 1, waiting);
+        v.scroll_rest -= moved - steps * v.glide_rows_a_step * way;
+        v.glide_steps_unanswered -= steps * way;
+        if (waiting == 1) {
+            const a_step = std.math.clamp(@abs(moved), 1, most_rows_a_step);
+            if (perf_log and a_step != v.glide_rows_a_step) std.log.info("glide: {d} rows a step", .{a_step});
+            v.glide_rows_a_step = a_step;
+        }
+        v.glide_unanswered = v.glide_steps_unanswered * v.glide_rows_a_step;
+        v.aimGlide();
+    }
+
+    pub fn picture(v: *TermView, scale: f32) ?*gsk.RenderNode {
+        const own = gtk.Snapshot.new();
+        own.scale(scale, scale);
+        snapshotTermImpl(v, own);
+        return own.freeToNode();
+    }
+
+    pub fn coastBy(v: *TermView, rows_per_second: f64) void {
+        const t = v.term() orelse return;
+        if (!followsFingers(t)) return;
+        v.pointer = .{ @as(f64, @floatFromInt(v.widget().getWidth())) / 2, @as(f64, @floatFromInt(v.widget().getHeight())) / 2 };
+        v.coast_rows_per_second = rows_per_second;
+        v.startGlideTick();
+    }
+
+    pub fn wheelBy(v: *TermView, rows: f64) void {
+        const t = v.term() orelse return;
+        v.pointer = .{ @as(f64, @floatFromInt(v.widget().getWidth())) / 2, @as(f64, @floatFromInt(v.widget().getHeight())) / 2 };
+        if (t.frame.mouse or t.frame.alt_screen) v.wheelToProgram(t, rows, 0);
+    }
+
+    fn startGlideTick(v: *TermView) void {
+        if (v.glide_tick != 0) return;
+        v.glide_frame_us = 0;
+        v.glide_tick = v.widget().addTickCallback(&glideTick, v, null);
+    }
+
+    fn glideTick(_: *gtk.Widget, clock: *gdk.FrameClock, data: ?*anyopaque) callconv(.c) c_int {
+        const v: *TermView = @ptrCast(@alignCast(data.?));
+        const now = clock.getFrameTime();
+        const seconds: f64 = if (v.glide_frame_us == 0) 1.0 / 60.0 else @min(0.05, @as(f64, @floatFromInt(now - v.glide_frame_us)) / 1e6);
+        v.glide_frame_us = now;
+        const clock_now = glib.getMonotonicTime();
+        if (v.coast_rows_per_second != 0) {
+            if (v.term()) |t| v.wheelToProgram(t, v.coast_rows_per_second * seconds, 0);
+            v.coast_rows_per_second *= std.math.pow(f64, coast_fade_per_second, seconds);
+            if (@abs(v.coast_rows_per_second) * v.cell_h < coast_slowest_px_per_second) v.coast_rows_per_second = 0;
+        }
+        if (v.glide_unanswered != 0 and clock_now - v.glide_asked_us > glide_unanswered_us) {
+            v.glide_unanswered = 0;
+            v.glide_steps_unanswered = 0;
+        }
+        if (v.coast_rows_per_second == 0 and clock_now - v.glide_wheel_us > glide_fingers_gone_us) v.scroll_rest = 0;
+        v.aimGlide();
+        const easing = v.glide.ease(seconds, v.cell_h);
+        v.widget().queueDraw();
+        if (easing or v.coast_rows_per_second != 0 or v.scroll_rest != 0 or v.glide_unanswered != 0) return 1;
+        v.glide_tick = 0;
+        return 0;
     }
 
     /// Output that arrives while looking back through history shouldn't move what's shown.
@@ -3291,6 +3418,7 @@ fn placeRow(sn: *gtk.Snapshot, node: ?*gsk.RenderNode, top: f64) void {
 /// hidden and the cells the text left are empty, so the terminal's own background shows behind it, not the text and its
 /// selection. The cache of drawn rows keys on the cells, so it stays right.
 fn renderFrame(v: *TermView, t: *term_mod.Term) void {
+    t.honor_hold = settings.current.program_scroll_glide and t.frame.alt_screen;
     _ = t.render(true);
     // Where the text is now is known only once the terminal is read, so a lift whose text has
     // moved ends here, before its cells are emptied, not a frame late.
@@ -3306,6 +3434,19 @@ fn renderFrame(v: *TermView, t: *term_mod.Term) void {
         var x = s.x0;
         while (x < s.x1 and x < f.cols) : (x += 1) f.cells.items[@as(usize, s.row) * f.cols + x] = .{};
     }
+}
+
+fn drawGrid(v: *TermView, sn: *gtk.Snapshot, t: *term_mod.Term, f: *const term_mod.Frame, f_font: Font, frac: f64, h: f64) void {
+    drawBackgrounds(v, sn, f, pad_y + frac, 0, f.rows, h);
+    drawImages(v, sn, t, false, frac);
+    drawBlocks(v, sn, f, pad_y + frac, 0, f.rows, h);
+    var y: usize = 0;
+    while (y < f.rows) : (y += 1) {
+        const top = pad_y + frac + @as(f64, @floatFromInt(y)) * v.cell_h;
+        if (top > h) break;
+        placeRow(sn, rowNode(v, y, f, y, f_font), top);
+    }
+    drawImages(v, sn, t, true, frac);
 }
 
 pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
@@ -3397,16 +3538,23 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
         t.scroll(-1);
         renderFrame(v, t);
     }
-    drawBackgrounds(v, sn, f, pad_y + frac, 0, f.rows, h);
-    drawImages(v, sn, t, false, frac);
-    drawBlocks(v, sn, f, pad_y + frac, 0, f.rows, h);
-    var y: usize = 0;
-    while (y < f.rows) : (y += 1) {
-        const top = pad_y + frac + @as(f64, @floatFromInt(y)) * v.cell_h;
-        if (top > h) break;
-        placeRow(sn, rowNode(v, y, f, y, f_font), top);
+    if (settings.current.program_scroll_glide and f.alt_screen) {
+        if (v.glide.observe(f, if (glib.getMonotonicTime() < v.glide_armed_until) v.glide_direction else null, v.cell_h)) |shift| {
+            v.answered(shift.rows);
+            if (perf_log) std.log.info("glide: {d} rows in {d}..{d}", .{ shift.rows, shift.band.top, shift.band.bottom });
+        }
+        const own = gtk.Snapshot.new();
+        drawGrid(v, own, t, f, f_font, frac, h);
+        const grid = own.freeToNode();
+        if (grid) |g| {
+            if (v.glide.moving()) v.glide.draw(sn, g, .{ .w = w, .h = h, .pad_x = pad_x, .pad_y = pad_y, .cell_w = v.cell_w, .cell_h = v.cell_h, .px = .{ .origin = v.pixel_origin[1], .scale = v.pixel_scale }, .fill_alpha = term_opacity }) else sn.appendNode(g);
+        }
+        v.glide.keep(grid);
+        if (v.glide.moving()) v.startGlideTick();
+    } else {
+        v.glide.forget();
+        drawGrid(v, sn, t, f, f_font, frac, h);
     }
-    drawImages(v, sn, t, true, frac);
     if (v.link_armed) v.drawArmedLink(sn, t, frac);
 
     // Search matches, over the text.
@@ -3440,7 +3588,7 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     // The cursor, hollow when the pane doesn't have the keyboard.
     if (f.cursor_visible and f.cursor_y < f.rows and f.cursor_x < f.cols and f.scroll_offset + f.scroll_len >= f.scroll_total) {
         const cx = pad_x + @as(f64, @floatFromInt(f.cursor_x)) * v.cell_w;
-        const cy = pad_y + @as(f64, @floatFromInt(f.cursor_y)) * v.cell_h;
+        const cy = pad_y + @as(f64, @floatFromInt(f.cursor_y)) * v.cell_h + v.glide.cursorShift(.{ .origin = v.pixel_origin[1], .scale = v.pixel_scale });
         // A program's own cursor color wins; otherwise the theme's accent, like Rex.
         const color = if (f.cursor_color != 0 and f.cursor_color != f.fg) f.cursor_color else if (cursor_accent != 0) cursor_accent else f.fg;
         const focused = v.widget().hasFocus() != 0;
