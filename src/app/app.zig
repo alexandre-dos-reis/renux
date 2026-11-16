@@ -80,6 +80,16 @@ const css =
     \\.divider-line { border-radius: 99px; background-color: alpha(@accent_bg_color, 0.85); opacity: 0; transition: opacity 140ms ease-out; }
     \\.divider-line.shown { opacity: 1; transition: opacity 90ms ease-out 60ms; }
     \\.drop-target { background-color: alpha(@accent_bg_color, 0.16); border: 1.5px solid alpha(@accent_bg_color, 0.8); border-radius: 9px; color: @accent_color; }
+    \\.peek > contents { padding: 12px; border-radius: 16px; }
+    \\.peek-head { padding: 2px 4px 0 4px; }
+    \\.peek-body { background-color: @view_bg_color; border-radius: 10px; }
+    \\.peek-rows { padding: 8px 0; }
+    \\.peek-row { padding: 2px 16px 2px 2px; }
+    \\.peek-row.peek-target { background-color: alpha(@accent_bg_color, 0.18); }
+    \\.peek-message { padding: 0 18px; }
+    \\.peek-picture { margin: 10px; }
+    \\.peek button { padding: 5px 7px 5px 14px; border-radius: 9px; }
+    \\.peek-key { font-family: monospace; font-size: 0.8em; padding: 2px 7px; border-radius: 6px; background-color: alpha(currentColor, 0.14); }
     \\.renux-sidebar headerbar { background: none; box-shadow: none; min-height: 52px; padding: 0 6px; }
     \\.renux-sidebar list { background: none; padding: 2px 0 8px 8px; }
     \\window.sidebar-end .renux-sidebar list { padding: 2px 8px 8px 0; }
@@ -1544,6 +1554,8 @@ pub const App = struct {
         termview.theme_bg = (@as(u32, @intFromFloat(@round(cv.r * 255))) << 16) | (@as(u32, @intFromFloat(@round(cv.g * 255))) << 8) | @as(u32, @intFromFloat(@round(cv.b * 255)));
         const ac = palette.accent;
         termview.cursor_accent = (@as(u32, @intFromFloat(@round(ac.r * 255))) << 16) | (@as(u32, @intFromFloat(@round(ac.g * 255))) << 8) | @as(u32, @intFromFloat(@round(ac.b * 255)));
+        const ok = palette.success;
+        termview.theme_green = (@as(u32, @intFromFloat(@round(ok.r * 255))) << 16) | (@as(u32, @intFromFloat(@round(ok.g * 255))) << 8) | @as(u32, @intFromFloat(@round(ok.b * 255)));
         a.redrawAll();
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
@@ -4909,6 +4921,21 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
             benchWindow(a);
         } else if (std.mem.eql(u8, cmd, "drop")) {
             ws.simulateDrop();
+        } else if (std.mem.eql(u8, cmd, "peek-key")) {
+            // A key in the file peek that is open: peek-key enter | shift-enter
+            @import("../ui/peek.zig").press(rest);
+        } else if (std.mem.eql(u8, cmd, "open-link")) {
+            // Ctrl+click on the link at a cell: open-link COL ROW
+            const col = std.fmt.parseInt(u16, it.next() orelse "0", 10) catch 0;
+            const row = std.fmt.parseInt(u16, it.next() orelse "0", 10) catch 0;
+            tv.openLinkAt(col, row);
+        } else if (std.mem.eql(u8, cmd, "upload")) {
+            // Sends a file as dropping it on a remote pane does: upload /path/to/file
+            const sent = gpa.dupeSentinel(u8, rest, 0) catch continue;
+            defer gpa.free(sent);
+            const file = gio.File.newForPath(sent.ptr);
+            defer file.unref();
+            _ = tv.upload(file, false);
         } else if (std.mem.eql(u8, cmd, "sidebar")) {
             if (a.split.getSidebar()) |sb| std.log.info("sidebar was {d} wide (asked {d:.0}, min {d:.0}, max {d:.0}, room {d}, header {d})", .{ sb.getWidth(), a.split.getMaxSidebarWidth(), a.split.getMinSidebarWidth(), a.split.getMaxSidebarWidth(), a.header_room.getWidth(), a.side_header.getWidth() });
             a.setSidebarWidth(std.fmt.parseFloat(f64, it.next() orelse "250") catch 250);
@@ -5145,7 +5172,7 @@ fn takeShot(_: ?*anyopaque) callconv(.c) c_int {
         }
     }
     // A hover card is a window of its own, so it gets a picture of its own beside the first.
-    if (@import("../ui/hovercard.zig").visibleCard()) |cw| {
+    if (@import("../ui/hovercard.zig").visibleCard() orelse @import("../ui/peek.zig").visible()) |cw| {
         const cp = gtk.WidgetPaintable.new(cw);
         defer cp.as(gobject.Object).unref();
         const cs = gtk.Snapshot.new();

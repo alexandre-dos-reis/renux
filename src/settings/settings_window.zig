@@ -518,6 +518,10 @@ fn serverPage(ctx: *Ctx) *gtk.Widget {
     return p.as(gtk.Widget);
 }
 
+fn editorApplied(row: *adw.EntryRow, _: *Ctx) callconv(.c) void {
+    settings.setString(&settings.current.editor_command, std.mem.trim(u8, std.mem.span(row.as(gtk.Editable).getText()), " "));
+}
+
 fn labelApplied(row: *adw.EntryRow, _: *Ctx) callconv(.c) void {
     settings.setString(&settings.current.client_label, std.mem.trim(u8, std.mem.span(row.as(gtk.Editable).getText()), " "));
 }
@@ -1057,6 +1061,17 @@ fn terminalPage(ctx: *Ctx) *gtk.Widget {
     switchRow(ctx, paste, "Animation on copy", "The copied text lifts and a glint runs across it", &settings.current.copy_animation, null);
     switchRow(ctx, paste, "Copy on select", "Selected text goes straight to the clipboard. Programs that handle the mouse themselves, such as Claude Code, copy their own selections", &settings.current.copy_on_select, null);
     switchRow(ctx, paste, "Ask before pasting several lines", "Unless the program knows it's a paste, each line could run as a command", &settings.current.paste_warning, null);
+    const files = group(p, "Files");
+    files.setDescription("Ctrl+click on a file's path shows a peek of it. Enter there opens the file in a new pane to the right, and Shift+Enter in a new window, by typing this command at its shell; {path} and {line} are filled in");
+    const editor = adw.EntryRow.new();
+    editor.as(adw.PreferencesRow).setTitle("Editor command");
+    if (gpa.dupeSentinel(u8, settings.current.editor_command, 0)) |current| {
+        defer gpa.free(current);
+        editor.as(gtk.Editable).setText(current.ptr);
+    } else |_| {}
+    editor.setShowApplyButton(1);
+    _ = adw.EntryRow.signals.apply.connect(editor, *Ctx, &editorApplied, ctx, .{});
+    files.add(editor.as(gtk.Widget));
     return p.as(gtk.Widget);
 }
 

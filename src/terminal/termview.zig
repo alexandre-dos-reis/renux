@@ -21,12 +21,246 @@ const Binding = @import("../rex/server.zig").Binding;
 const Stream = @import("../rex/stream.zig").Stream;
 const boxdraw = @import("boxdraw.zig");
 const links = @import("links.zig");
+const paths = @import("paths.zig");
 const programs = @import("../icons/programs.zig");
 const settings = @import("../settings/settings.zig");
 const shader = @import("shader.zig");
 const fonts = @import("fonts.zig");
+const upload_ui = @import("../ui/upload.zig");
+const peek = @import("../ui/peek.zig");
 
 const gpa = std.heap.c_allocator;
+
+const ClipboardKind = enum { files, image, text };
+
+fn clipboardKind(formats: *const gdk.ContentFormats) ClipboardKind {
+    if (formats.containGtype(gdk.FileList.getGObjectType()) != 0 or formats.containMimeType("text/uri-list") != 0) return .files;
+    if (formats.containGtype(gdk.Texture.getGObjectType()) != 0) return .image;
+    var count: usize = 0;
+    if (formats.getMimeTypes(&count)) |mimes| for (mimes[0..count]) |mime| {
+        if (std.mem.startsWith(u8, std.mem.span(mime orelse continue), "image/")) return .image;
+    };
+    return .text;
+}
+
+fn saveClipboardImage(texture: *gdk.Texture) !*gio.File {
+    var io: *gio.FileIOStream = undefined;
+    const file = gio.File.newTmp("renux-clipboard-XXXXXX.png", &io, null) orelse return error.TempFileFailed;
+    errdefer {
+        _ = file.delete(null, null);
+        file.unref();
+    }
+    defer io.unref();
+    const stream = io.as(gio.IOStream);
+    defer _ = stream.close(null, null);
+    const png = texture.saveToPngBytes();
+    defer png.unref();
+    var size: usize = 0;
+    const bytes = png.getData(&size) orelse return error.NoImageData;
+    if (stream.getOutputStream().writeAll(@constCast(bytes), size, null, null, null) == 0 or stream.close(null, null) == 0) return error.WriteFailed;
+    return file;
+}
+
+fn singleClipboardFile(value: *const gobject.Value) !*gio.File {
+    const files: *gdk.FileList = @ptrCast(@alignCast(value.getBoxed() orelse return error.NoFiles));
+    const head = files.getFiles();
+    // shortcut: one file per upload; use Rex's batching protocol before accepting several.
+    if (head.f_next != null) return error.MultipleFiles;
+    return @ptrCast(@alignCast(head.f_data orelse return error.NoFiles));
+}
+
+test "clipboard handles files and images without treating plain text as an attachment" {
+    const typed = gdk.ContentFormats.newForGtype(gdk.FileList.getGObjectType());
+    defer typed.unref();
+    try std.testing.expectEqual(ClipboardKind.files, clipboardKind(typed));
+    const texture = gdk.ContentFormats.newForGtype(gdk.Texture.getGObjectType());
+    defer texture.unref();
+    try std.testing.expectEqual(ClipboardKind.image, clipboardKind(texture));
+    for ([_][*:0]const u8{ "text/uri-list", "text/plain", "image/png", "image/jpeg", "image/webp" }, [_]ClipboardKind{ .files, .text, .image, .image, .image }) |mime, expected| {
+        var mimes = [_][*:0]const u8{mime};
+        const formats = gdk.ContentFormats.new(&mimes, 1);
+        defer formats.unref();
+        try std.testing.expectEqual(expected, clipboardKind(formats));
+    }
+    var mimes = [_][*:0]const u8{ "image/png", "text/plain", "text/uri-list" };
+    const mixed = gdk.ContentFormats.new(&mimes, mimes.len);
+    defer mixed.unref();
+    try std.testing.expectEqual(ClipboardKind.files, clipboardKind(mixed));
+}
+
+test "clipboard accepts exactly one file without dropping extra files silently" {
+    var files = [_]*gio.File{ gio.File.newForPath("/tmp/copied 'file'.png"), gio.File.newForPath("/tmp/second.txt") };
+    defer for (files) |file| file.as(gobject.Object).unref();
+    var value = std.mem.zeroes(gobject.Value);
+    _ = value.init(gdk.FileList.getGObjectType());
+    defer value.unset();
+    value.takeBoxed(gdk.FileList.newFromArray(&files, 1));
+    try std.testing.expectEqual(files[0], try singleClipboardFile(&value));
+    value.takeBoxed(gdk.FileList.newFromArray(&files, 2));
+    try std.testing.expectError(error.MultipleFiles, singleClipboardFile(&value));
+    value.setBoxed(null);
+    try std.testing.expectError(error.NoFiles, singleClipboardFile(&value));
+}
+
+test "clipboard image becomes a private PNG with the same pixels" {
+    const pixels = [_]u8{ 255, 100, 0, 255, 10, 20, 30, 128, 0, 0, 0, 0 };
+    const bytes = glib.Bytes.new(&pixels, pixels.len);
+    defer bytes.unref();
+    const memory = gdk.MemoryTexture.new(3, 1, .r8g8b8a8, bytes, pixels.len);
+    defer memory.as(gobject.Object).unref();
+    const texture = memory.as(gdk.Texture);
+    const file = try saveClipboardImage(texture);
+    defer file.unref();
+    defer _ = file.delete(null, null);
+    const info = file.queryInfo("unix::mode", .{}, null, null) orelse return error.MissingFileInfo;
+    defer info.unref();
+    try std.testing.expectEqual(@as(u32, 0o600), info.getAttributeUint32("unix::mode") & 0o777);
+    const decoded = gdk.Texture.newFromFile(file, null) orelse return error.InvalidPng;
+    defer decoded.as(gobject.Object).unref();
+    try std.testing.expectEqual(@as(c_int, 3), decoded.getWidth());
+    try std.testing.expectEqual(@as(c_int, 1), decoded.getHeight());
+    var expected: [12]u8 = undefined;
+    var actual: [12]u8 = undefined;
+    texture.download(&expected, expected.len);
+    decoded.download(&actual, actual.len);
+    try std.testing.expectEqualSlices(u8, &expected, &actual);
+}
+
+test "clipboard upload integration" {
+    const mode = std.mem.span(std.c.getenv("RENUX_CLIPBOARD_TEST_MODE") orelse return error.SkipZigTest);
+    const url = std.mem.span(std.c.getenv("RENUX_UPLOAD_TEST_URL") orelse return error.MissingTestUrl);
+    const sid = std.mem.span(std.c.getenv("RENUX_UPLOAD_TEST_SESSION") orelse return error.MissingTestSession);
+    const bid = std.mem.span(std.c.getenv("RENUX_UPLOAD_TEST_BLOCK") orelse return error.MissingTestBlock);
+    const path = std.c.getenv("RENUX_UPLOAD_TEST_FILE") orelse return error.MissingTestFile;
+    const record = std.c.getenv("RENUX_CLIPBOARD_TEST_RECORD") orelse return error.MissingTestRecord;
+    adw.init();
+    settings.load();
+    const server = try Server.create(url, "clipboard integration");
+    var host_live = true;
+    defer if (host_live) server.destroy();
+    const context = glib.MainContext.default();
+    const deadline = glib.getMonotonicTime() + 10_000_000;
+    while (server.state != .online and glib.getMonotonicTime() < deadline) {
+        _ = context.iteration(0);
+        glib.usleep(1000);
+    }
+    try std.testing.expectEqual(@import("../rex/server.zig").State.online, server.state);
+    _ = server.terminal(sid, bid) orelse return error.NoTestTerminal;
+    while (!server.attached.contains(sid) and glib.getMonotonicTime() < deadline) {
+        _ = context.iteration(0);
+        glib.usleep(1000);
+    }
+    try std.testing.expect(server.attached.contains(sid));
+    if (!server.blocks.contains(bid)) try server.blocks.put(gpa, try gpa.dupe(u8, bid), .{});
+    const info = server.blockInfo(bid).?;
+    if (info.program) |old| gpa.free(old);
+    info.program = try gpa.dupe(u8, if (std.mem.eql(u8, mode, "shell-ctrlv")) "bash" else "claude");
+    const overlay = adw.ToastOverlay.new();
+    _ = overlay.as(gobject.Object).refSink();
+    defer overlay.as(gobject.Object).unref();
+    const v = try TermView.create(server, sid, bid);
+    overlay.setChild(v.widget());
+    const clipboard = v.widget().getClipboard();
+    var value = std.mem.zeroes(gobject.Value);
+    defer value.unset();
+    const file_mode = std.mem.endsWith(u8, mode, "file");
+    const text_mode = std.mem.endsWith(u8, mode, "text");
+    if (file_mode) {
+        const file = gio.File.newForPath(path);
+        defer file.unref();
+        if (std.mem.eql(u8, mode, "uri-file")) {
+            const uri = file.getUri();
+            defer glib.free(uri);
+            const bytes = glib.Bytes.new(uri, std.mem.len(uri));
+            defer bytes.unref();
+            const provider = gdk.ContentProvider.newForBytes("text/uri-list", bytes);
+            defer provider.unref();
+            try std.testing.expect(clipboard.setContent(provider) != 0);
+            _ = value.init(gobject.ext.types.string);
+        } else {
+            _ = value.init(gdk.FileList.getGObjectType());
+            var files = [_]*gio.File{ file, file };
+            value.takeBoxed(gdk.FileList.newFromArray(&files, if (std.mem.eql(u8, mode, "multiple-file")) 2 else 1));
+        }
+    } else if (text_mode) {
+        _ = value.init(gobject.ext.types.string);
+        value.setString("ordinary clipboard text");
+    } else {
+        const texture = gdk.Texture.newFromFilename(path, null) orelse return error.InvalidImageFixture;
+        defer texture.as(gobject.Object).unref();
+        // The expected upload is the normalized PNG, not necessarily the source encoding.
+        const expected = std.c.getenv("RENUX_CLIPBOARD_TEST_EXPECTED") orelse return error.MissingExpectedFile;
+        try std.testing.expect(texture.saveToPng(expected) != 0);
+        if (std.mem.eql(u8, mode, "texture")) {
+            _ = value.init(gdk.Texture.getGObjectType());
+            value.setObject(texture.as(gobject.Object));
+        } else {
+            const bytes = if (std.mem.eql(u8, mode, "invalid-image")) glib.Bytes.new("not a PNG", 9) else texture.saveToPngBytes();
+            defer bytes.unref();
+            const provider = gdk.ContentProvider.newForBytes("image/png", bytes);
+            defer provider.unref();
+            try std.testing.expect(clipboard.setContent(provider) != 0);
+            _ = value.init(gobject.ext.types.string);
+        }
+    }
+    if (!std.mem.eql(u8, mode, "uri-file") and (file_mode or text_mode or std.mem.eql(u8, mode, "texture"))) {
+        const provider = gdk.ContentProvider.newForValue(&value);
+        defer provider.unref();
+        try std.testing.expect(clipboard.setContent(provider) != 0);
+    }
+    server.message.clearRetainingCapacity();
+    const ctrl_v = std.mem.startsWith(u8, mode, "ctrlv-") or std.mem.eql(u8, mode, "shell-ctrlv");
+    try std.testing.expectEqual(@as(c_int, 1), v.handleKey('v', if (ctrl_v) keys.ctrl else keys.ctrl | keys.shift));
+    const destroying = std.mem.startsWith(u8, mode, "destroy-");
+    const failed = std.mem.eql(u8, mode, "invalid-image") or std.mem.eql(u8, mode, "save-failure") or std.mem.eql(u8, mode, "multiple-file");
+    if (destroying) {
+        overlay.setChild(null);
+        if (std.mem.eql(u8, mode, "destroy-host")) {
+            server.destroy();
+            host_live = false;
+        }
+    }
+    var got_input = false;
+    const until = glib.getMonotonicTime() + if (destroying or failed) @as(i64, 500_000) else @as(i64, 10_000_000);
+    while (glib.getMonotonicTime() < until) {
+        _ = context.iteration(0);
+        var contents: [*]u8 = undefined;
+        var length: usize = 0;
+        if (glib.fileGetContents(record, &contents, &length, null) != 0) {
+            glib.free(contents);
+            if (length > 0) {
+                got_input = true;
+                break;
+            }
+        }
+        glib.usleep(1000);
+    }
+    try std.testing.expectEqual(!destroying and !failed, got_input);
+    if (failed) try std.testing.expect(server.message.items.len > 0);
+    const settled = glib.getMonotonicTime() + 200_000;
+    while (glib.getMonotonicTime() < settled) {
+        _ = context.iteration(0);
+        glib.usleep(1000);
+    }
+    _ = clipboard.setContent(null);
+}
+
+test "file hover targets preserve web and OSC8 links without reading files" {
+    const t = term_mod.Term.create(80, 4) orelse return error.NoTerminal;
+    defer t.destroy();
+    t.write("./result.png https://example.com/a.png\r\n\x1b]8;;file:///tmp/picture%20one.png\x1b\\picture\x1b]8;;\x1b\\");
+    try std.testing.expect(t.render(true));
+    var path = TermView.textLinkAt(t, 3, 0) orelse return error.NoPath;
+    defer path.deinit(gpa);
+    try std.testing.expectEqualStrings("renux-file:./result.png", path.url);
+    var url = TermView.textLinkAt(t, 20, 0) orelse return error.NoUrl;
+    defer url.deinit(gpa);
+    try std.testing.expectEqualStrings("https://example.com/a.png", url.url);
+    const osc = t.hyperlinkAt(2, 1) orelse return error.NoHyperlink;
+    defer gpa.free(osc);
+    try std.testing.expect(TermView.isFileLink(osc));
+    try std.testing.expect(!TermView.isFileLink(url.url));
+}
 
 /// The space around the text, from the settings.
 pub var pad_x: f64 = 8;
@@ -95,6 +329,8 @@ pub const Font = struct {
 pub var font: ?Font = null;
 /// The theme's accent as 0xRRGGBB, which the cursor takes unless a program sets its own.
 pub var cursor_accent: u32 = 0;
+/// The theme's green as 0xRRGGBB, which the name of a file being sent turns as it goes.
+pub var theme_green: u32 = 0;
 /// How opaque a terminal's own background is.
 pub var term_opacity: f64 = 1;
 /// Told each time a pane has drawn, so the window's cursor layer can follow its cursor.
@@ -485,6 +721,19 @@ pub const TermView = struct {
     pointer_in: bool = false,
     /// Text an input method is still composing, shown at the cursor until it's committed.
     preedit: ?[:0]u8 = null,
+    /// The text that stands for a file being sent: where it and its cancel button were last
+    /// drawn, whether the pointer is over each, and whether the press under way landed on the
+    /// button. The button shows while the pointer is over the text.
+    upload_area: ?[4]f64 = null,
+    upload_cancel: ?[4]f64 = null,
+    upload_hover: bool = false,
+    upload_hand: bool = false,
+    upload_press: bool = false,
+    /// How much of the file the text shows as sent, which eases toward how much has been, and
+    /// the tick that moves it.
+    upload_shown: f64 = 0,
+    upload_tick: c_uint = 0,
+    upload_frame_us: i64 = 0,
     /// This pane's text size relative to the setting, and its font at that size.
     zoom: f64 = 1,
     own_font: ?Font = null,
@@ -509,6 +758,8 @@ pub const TermView = struct {
     menu: ?*gtk.PopoverMenu = null,
     menu_link: ?[:0]u8 = null,
     menu_cell: [2]u16 = .{ 0, 0 },
+    /// The cell of the link being opened, which a file's peek is shown by.
+    link_cell: [2]u16 = .{ 0, 0 },
     /// Dragging the scroll position marker.
     dragging_bar: bool = false,
     /// When a bell flash fades out, in monotonic microseconds.
@@ -590,7 +841,7 @@ pub const TermView = struct {
         _ = gtk.GestureDrag.signals.drag_end.connect(drag, *TermView, &onDragEnd, v, .{});
         w.addController(drag.as(gtk.EventController));
 
-        // A file dropped on the pane is pasted as its path, quoted for the shell.
+        // Local drops insert a path; remote drops send the file before Rex inserts its path.
         const drop = gtk.DropTarget.new(gio.File.getGObjectType(), .{ .copy = true });
         _ = gtk.DropTarget.signals.drop.connect(drop, *TermView, &onDrop, v, .{});
         w.addController(drop.as(gtk.EventController));
@@ -713,6 +964,9 @@ pub const TermView = struct {
 
     fn onDestroy(_: *gtk.Widget, v: *TermView) callconv(.c) void {
         v.im.as(gtk.IMContext).setClientWidget(null);
+        upload_ui.unwatch(v);
+        peek.closeFor(v.widget());
+        if (v.upload_tick != 0) v.widget().removeTickCallback(v.upload_tick);
         if (v.edge_timer != 0) _ = glib.Source.remove(v.edge_timer);
         if (v.menu) |m| m.as(gtk.Widget).unparent();
         if (v.menu_link) |l| gpa.free(l);
@@ -1000,6 +1254,16 @@ pub const TermView = struct {
         if (keys.rexName(&name_buf, keyval, gdk.keyvalToUnicode(keyval), mods)) |name| {
             if (v.chord(name)) return 1;
         }
+        // Agents use Ctrl+V for attachments; shells still need it for literal-next.
+        if (mods == keys.ctrl and (keyval == 'v' or keyval == 'V')) if (v.server.blockInfo(v.block_id)) |info| {
+            if (programs.isAgent(info.program) or programs.isAgent(info.status_app)) {
+                const clipboard = v.widget().getClipboard();
+                if (clipboardKind(clipboard.getFormats()) != .text) {
+                    v.pasteFrom(clipboard);
+                    return 1;
+                }
+            }
+        };
         // Super+C and V (Command on a Mac) copy and paste. Ctrl+C copies while text is selected
         // and interrupts otherwise; Ctrl+Shift+C and V work too, like other Linux terminals.
         if (mods == keys.super and (keyval == 'c' or keyval == 'C')) {
@@ -1231,16 +1495,72 @@ pub const TermView = struct {
 
     fn onDrop(_: *gtk.DropTarget, value: *const gobject.Value, _: f64, _: f64, v: *TermView) callconv(.c) c_int {
         const obj = value.getObject() orelse return 0;
-        const file: *gio.File = @ptrCast(obj);
-        const path = file.getPath() orelse return 0;
+        if (!v.insertFile(@ptrCast(obj), false)) return 0;
+        _ = v.widget().grabFocus();
+        return 1;
+    }
+
+    fn insertFile(v: *TermView, file: *gio.File, temporary: bool) bool {
+        if (v.onRemoteHost()) return v.upload(file, temporary);
+        const path = file.getPath() orelse return false;
         defer glib.free(path);
         const quoted = glib.shellQuote(path);
         defer glib.free(quoted);
-        const text = std.fmt.allocPrint(gpa, "{s} ", .{std.mem.span(quoted)}) catch return 0;
+        const text = std.fmt.allocPrint(gpa, "{s} ", .{std.mem.span(quoted)}) catch return false;
         defer gpa.free(text);
         v.server.paste(v.session_id, v.block_id, text);
-        _ = v.widget().grabFocus();
-        return 1;
+        return true;
+    }
+
+    /// Sends a file to the pane's machine, where Rex pastes its path once it has arrived. A
+    /// temporary file is deleted afterwards.
+    pub fn upload(v: *TermView, file: *gio.File, temporary: bool) bool {
+        v.upload_shown = 0;
+        return upload_ui.start(v.widget(), v.server, v.session_id, v.block_id, file, temporary, .{ .ctx = v, .changed = uploadChanged });
+    }
+
+    /// The file being sent to this pane got further, or is done: its text is drawn again.
+    fn uploadChanged(ctx: *anyopaque) void {
+        const v: *TermView = @ptrCast(@alignCast(ctx));
+        v.widget().queueDraw();
+        if (v.upload_tick != 0) return;
+        v.upload_frame_us = 0;
+        v.upload_tick = v.widget().addTickCallback(&uploadTick, v, null);
+    }
+
+    /// The green moves along the name smoothly, however unevenly the file itself goes.
+    fn uploadTick(_: *gtk.Widget, clock: *gdk.FrameClock, data: ?*anyopaque) callconv(.c) c_int {
+        const v: *TermView = @ptrCast(@alignCast(data.?));
+        const target = if (upload_ui.find(v.server, v.block_id)) |up| up.fraction() else v.upload_shown;
+        const now = clock.getFrameTime();
+        const dt: f64 = if (v.upload_frame_us == 0) 1.0 / 60.0 else @min(0.05, @as(f64, @floatFromInt(now - v.upload_frame_us)) / 1e6);
+        v.upload_frame_us = now;
+        v.upload_shown += (target - v.upload_shown) * (1 - std.math.pow(f64, 0.02, dt));
+        if (@abs(target - v.upload_shown) < 0.002) v.upload_shown = target;
+        v.widget().queueDraw();
+        // It rests until the file gets further, which starts it again.
+        if (v.upload_shown != target) return 1;
+        v.upload_tick = 0;
+        return 0;
+    }
+
+    fn pointerIn(v: *const TermView, area: ?[4]f64) bool {
+        const r = area orelse return false;
+        return v.pointer_in and v.pointer[0] >= r[0] and v.pointer[0] < r[0] + r[2] and v.pointer[1] >= r[1] and v.pointer[1] < r[1] + r[3];
+    }
+
+    /// Works out whether the pointer is over the upload's text, which shows its cancel button,
+    /// and over the button, where it is a hand. Returns whether either just changed.
+    fn syncUploadHover(v: *TermView) bool {
+        const hover = v.pointerIn(v.upload_area);
+        const hand = v.pointerIn(v.upload_cancel);
+        if (hover == v.upload_hover and hand == v.upload_hand) return false;
+        v.upload_hover = hover;
+        if (hand != v.upload_hand) {
+            v.upload_hand = hand;
+            v.widget().setCursorFromName(if (hand or v.link_hand) "pointer" else "text");
+        }
+        return true;
     }
 
     /// Lights the pane up briefly, for the bell.
@@ -1263,20 +1583,112 @@ pub const TermView = struct {
         v.pasteFrom(v.widget().getClipboard());
     }
 
-    /// Pastes a clipboard's text into this pane, once the text arrives.
+    /// Files and images become paths; ordinary text keeps the usual paste safeguards.
     fn pasteFrom(v: *TermView, clipboard: *gdk.Clipboard) void {
-        // The view could be gone when the text arrives, so carry the ids instead.
+        // The view or host could be gone when the clipboard read finishes.
         const ids = gpa.create(PasteTarget) catch return;
         const session_id = gpa.dupe(u8, v.session_id) catch return gpa.destroy(ids);
         const block_id = gpa.dupe(u8, v.block_id) catch {
             gpa.free(session_id);
             return gpa.destroy(ids);
         };
-        ids.* = .{ .server = v.server, .session_id = session_id, .block_id = block_id };
-        clipboard.readTextAsync(null, &pasted, ids);
+        ids.* = .{ .server = v.server, .session_id = session_id, .block_id = block_id, .widget = undefined };
+        ids.widget.init(v.widget().as(gobject.Object));
+        switch (clipboardKind(clipboard.getFormats())) {
+            .files => clipboard.readValueAsync(gdk.FileList.getGObjectType(), 0, null, &pastedFiles, ids),
+            .image => clipboard.readTextureAsync(null, &pastedImage, ids),
+            .text => clipboard.readTextAsync(null, &pasted, ids),
+        }
     }
 
-    const PasteTarget = struct { server: *Server, session_id: []u8, block_id: []u8 };
+    const PasteTarget = struct {
+        server: *Server,
+        session_id: []u8,
+        block_id: []u8,
+        widget: gobject.WeakRef,
+
+        fn destroy(t: *PasteTarget) void {
+            t.widget.clear();
+            gpa.free(t.session_id);
+            gpa.free(t.block_id);
+            gpa.destroy(t);
+        }
+    };
+
+    fn pastedFiles(source: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
+        const t: *PasteTarget = @ptrCast(@alignCast(data.?));
+        defer t.destroy();
+        const clipboard: *gdk.Clipboard = @ptrCast(source orelse return);
+        const value = clipboard.readValueFinish(result, null);
+        if (!t.server.isLive()) return;
+        const obj = t.widget.get() orelse return;
+        defer obj.unref();
+        const canvas: *Canvas = @ptrCast(@alignCast(obj));
+        const v = canvas.view orelse return;
+        const file = singleClipboardFile(value orelse {
+            t.server.notifyMessage("Couldn't read the copied file from the clipboard");
+            return;
+        }) catch |err| {
+            t.server.notifyMessage(switch (err) {
+                error.MultipleFiles => "Paste one file at a time",
+                else => "The clipboard doesn't contain a file",
+            });
+            return;
+        };
+        _ = v.insertFile(file, false);
+    }
+
+    fn pastedImage(source: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
+        const t: *PasteTarget = @ptrCast(@alignCast(data.?));
+        const clipboard: *gdk.Clipboard = @ptrCast(source.?);
+        const texture = clipboard.readTextureFinish(result, null) orelse {
+            if (t.server.isLive()) t.server.notifyMessage("Couldn't read the clipboard image");
+            t.destroy();
+            return;
+        };
+        defer texture.as(gobject.Object).unref();
+        // PNG encoding and disk IO must not block typing or rendering.
+        const task = gio.Task.new(texture.as(gobject.Object), null, &imageSaved, t);
+        task.runInThread(&encodeImage);
+        task.unref();
+    }
+
+    fn encodeImage(task: *gio.Task, source: *gobject.Object, _: ?*anyopaque, _: ?*gio.Cancellable) callconv(.c) void {
+        const file = saveClipboardImage(@ptrCast(source)) catch {
+            task.returnPointer(null, null);
+            return;
+        };
+        task.returnPointer(file, &discardImage);
+    }
+
+    fn discardImage(data: ?*anyopaque) callconv(.c) void {
+        const file: *gio.File = @ptrCast(@alignCast(data.?));
+        file.deleteAsync(glib.PRIORITY_DEFAULT, null, null, null);
+        file.unref();
+    }
+
+    fn imageSaved(_: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
+        const t: *PasteTarget = @ptrCast(@alignCast(data.?));
+        defer t.destroy();
+        const task: *gio.Task = @ptrCast(result);
+        const file: ?*gio.File = @ptrCast(task.propagatePointer(null));
+        var inserted = false;
+        defer if (file) |f| {
+            if (!inserted) f.deleteAsync(glib.PRIORITY_DEFAULT, null, null, null);
+            f.unref();
+        };
+        if (!t.server.isLive()) return;
+        const obj = t.widget.get() orelse return;
+        defer obj.unref();
+        const canvas: *Canvas = @ptrCast(@alignCast(obj));
+        const v = canvas.view orelse return;
+        const image = file orelse {
+            t.server.notifyMessage("Couldn't save the clipboard image as a file");
+            return;
+        };
+        // Local paths must remain readable after paste; remote uploads remove their source.
+        inserted = v.insertFile(image, true);
+    }
 
     const PendingPaste = struct { server: *Server, session_id: []u8, block_id: []u8, text: []u8 };
 
@@ -1311,11 +1723,7 @@ pub const TermView = struct {
 
     fn pasted(source: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
         const t: *PasteTarget = @ptrCast(@alignCast(data.?));
-        defer {
-            gpa.free(t.session_id);
-            gpa.free(t.block_id);
-            gpa.destroy(t);
-        }
+        defer t.destroy();
         const clipboard: *gdk.Clipboard = @ptrCast(source orelse return);
         const text = clipboard.readTextFinish(result, null) orelse return;
         defer glib.free(text);
@@ -1369,12 +1777,14 @@ pub const TermView = struct {
     fn onMotion(motion: *gtk.EventControllerMotion, x: f64, y: f64, v: *TermView) callconv(.c) void {
         v.pointer = .{ x, y };
         v.pointer_in = true;
+        if (v.syncUploadHover()) v.widget().queueDraw();
         const held = modsNow(motion) & keys.ctrl != 0;
         if (held or v.link_armed) v.armLink(held);
     }
 
     fn onLeave(_: *gtk.EventControllerMotion, v: *TermView) callconv(.c) void {
         v.pointer_in = false;
+        if (v.syncUploadHover()) v.widget().queueDraw();
         if (v.link_armed) v.armLink(false);
     }
 
@@ -1385,21 +1795,17 @@ pub const TermView = struct {
         var hand = false;
         if (armed) {
             if (v.term()) |t| {
-                // A program that takes the mouse gets the click, so nothing would open.
-                if (t.frame.mouse and !v.linksOpenHere()) {
-                    armed = false;
-                } else {
-                    const cell = v.cellAt(v.pointer[0], v.pointer[1]);
-                    if (v.linkAt(t, cell[0], cell[1])) |url| {
-                        gpa.free(url);
-                        hand = true;
-                    }
+                const cell = v.cellAt(v.pointer[0], v.pointer[1]);
+                if (v.linkAt(t, cell[0], cell[1])) |url| {
+                    defer gpa.free(url);
+                    armed = !t.frame.mouse or v.linksOpenHere() or isFileLink(url);
+                    hand = armed;
                 }
             } else armed = false;
         }
         if (hand != v.link_hand) {
             v.link_hand = hand;
-            v.widget().setCursorFromName(if (hand) "pointer" else "text");
+            v.widget().setCursorFromName(if (hand or v.upload_hand) "pointer" else "text");
         }
         if (armed or v.link_armed) v.widget().queueDraw();
         v.link_armed = armed;
@@ -1515,10 +1921,19 @@ pub const TermView = struct {
     fn onPressed(gesture: *gtk.GestureClick, n_press: c_int, x: f64, y: f64, v: *TermView) callconv(.c) void {
         _ = v.widget().grabFocus();
         if (v.on_focus) |f| f.f(f.ctx, v.block_id);
+        const button = gesture.as(gtk.GestureSingle).getCurrentButton();
+        // An upload's cancel button keeps its click from the program and from selecting.
+        v.pointer = .{ x, y };
+        v.pointer_in = true;
+        _ = v.syncUploadHover();
+        v.upload_press = button == 1 and v.upload_hand;
+        if (v.upload_press) {
+            if (upload_ui.find(v.server, v.block_id)) |up| up.cancel();
+            return;
+        }
         const t = v.term() orelse return;
         const mods = modsNow(gesture);
         const cell = v.cellAt(x, y);
-        const button = gesture.as(gtk.GestureSingle).getCurrentButton();
         // The release opens the link here, so the program never hears of the click.
         if (button == 1 and v.keepsLinkClick(t, mods, cell)) return;
         if (v.programHasMouse(mods)) {
@@ -1550,12 +1965,18 @@ pub const TermView = struct {
     }
 
     fn onReleased(gesture: *gtk.GestureClick, n_press: c_int, x: f64, y: f64, v: *TermView) callconv(.c) void {
+        if (v.upload_press) {
+            v.upload_press = false;
+            return;
+        }
         const t = v.term() orelse return;
         const mods = modsNow(gesture);
         const cell = v.cellAt(x, y);
         if (gesture.as(gtk.GestureSingle).getCurrentButton() == 1 and v.keepsLinkClick(t, mods, cell)) {
+            if (n_press != 1 or v.selecting) return;
             if (v.linkAt(t, cell[0], cell[1])) |url| {
                 defer gpa.free(url);
+                v.link_cell = cell;
                 v.openLink(url);
             }
             return;
@@ -1569,6 +1990,7 @@ pub const TermView = struct {
         if (mods & keys.ctrl != 0) {
             if (v.linkAt(t, cell[0], cell[1])) |url| {
                 defer gpa.free(url);
+                v.link_cell = cell;
                 v.openLink(url);
                 return;
             }
@@ -1592,10 +2014,10 @@ pub const TermView = struct {
     /// Whether a Ctrl+click at a cell is kept from a program that takes the mouse, to open the
     /// link there on this computer.
     fn keepsLinkClick(v: *TermView, t: *term_mod.Term, mods: u4, cell: struct { u16, u16 }) bool {
-        if (mods & keys.ctrl == 0 or !v.programHasMouse(mods) or !v.linksOpenHere()) return false;
+        if (mods & keys.ctrl == 0 or !v.programHasMouse(mods)) return false;
         const url = v.linkAt(t, cell[0], cell[1]) orelse return false;
-        gpa.free(url);
-        return true;
+        defer gpa.free(url);
+        return isFileLink(url) or v.linksOpenHere();
     }
 
     /// The link at a cell: an OSC 8 hyperlink, or a web address written in the text.
@@ -1627,7 +2049,8 @@ pub const TermView = struct {
             };
         }
         const casted: []const []const u21 = @ptrCast(rows.items);
-        return links.at(gpa, casted, f.wraps.items, col, row) catch null;
+        if (links.at(gpa, casted, f.wraps.items, col, row) catch null) |link| return link;
+        return paths.at(gpa, casted, f.wraps.items, col, row) catch null;
     }
 
     /// Underlines the web address under the pointer while Ctrl is held. A hyperlink a program
@@ -1655,7 +2078,9 @@ pub const TermView = struct {
             v.barTo(y);
             return;
         }
-        v.drag_to_program = v.programHasMouse(modsNow(gesture));
+        const mods = modsNow(gesture);
+        const hit = v.cellAt(x, y);
+        v.drag_to_program = v.programHasMouse(mods) and !(if (v.term()) |t| v.keepsLinkClick(t, mods, hit) else false);
         v.drag_origin = .{ x, y };
         const cell = v.cellAt(x, y);
         v.anchor = .{ cell[0], cell[1] };
@@ -1758,7 +2183,7 @@ pub const TermView = struct {
         if (v.menu == null) {
             const group = gio.SimpleActionGroup.new();
             defer group.unref();
-            inline for (.{ .{ "copy", menuCopy }, .{ "paste", menuPaste }, .{ "open-link", menuOpenLink }, .{ "copy-link", menuCopyLink }, .{ "copy-output", menuCopyOutput } }) |e| {
+            inline for (.{ .{ "copy", menuCopy }, .{ "paste", menuPaste }, .{ "open-link", menuOpenLink }, .{ "copy-link", menuCopyLink }, .{ "copy-output", menuCopyOutput }, .{ "preview-selection", menuPreviewSelection } }) |e| {
                 const action = gio.SimpleAction.new(e[0], null);
                 defer action.unref();
                 const Thunk = struct {
@@ -1775,7 +2200,10 @@ pub const TermView = struct {
         defer menu.unref();
         const edit = gio.Menu.new();
         defer edit.unref();
-        if (sel != null) edit.append("Copy", "pane.copy");
+        if (sel != null) {
+            edit.append("Copy", "pane.copy");
+            edit.append("Preview Selected Path", "pane.preview-selection");
+        }
         edit.append("Paste", "pane.paste");
         v.menu_cell = cell;
         edit.append("Copy Output", "pane.copy-output");
@@ -1783,8 +2211,8 @@ pub const TermView = struct {
         if (v.menu_link != null) {
             const link = gio.Menu.new();
             defer link.unref();
-            link.append("Open Link", "pane.open-link");
-            link.append("Copy Link", "pane.copy-link");
+            link.append(if (isFileLink(v.menu_link.?)) "Preview File" else "Open Link", "pane.open-link");
+            link.append(if (isFileLink(v.menu_link.?)) "Copy Path" else "Copy Link", "pane.copy-link");
             menu.appendSection(null, link.as(gio.MenuModel));
         }
         const layout = gio.Menu.new();
@@ -1829,14 +2257,58 @@ pub const TermView = struct {
         v.pasteClipboard();
     }
 
+    fn menuPreviewSelection(v: *TermView) void {
+        const t = v.term() orelse return;
+        const text = t.selectionText() orelse return;
+        defer gpa.free(text);
+        const path = std.mem.trim(u8, text, " \t\r\n\"'`");
+        if (path.len == 0 or std.mem.indexOfScalar(u8, path, '\n') != null) return;
+        @import("../ui/preview.zig").show(v.widget(), v.server, v.session_id, v.block_id, path);
+    }
+
+    /// Shows a small look at a file by the link that names it. `target` may end in `:LINE`.
+    fn peekFile(v: *TermView, target: []const u8) void {
+        const at: gdk.Rectangle = .{
+            .f_x = @intFromFloat(pad_x + @as(f64, @floatFromInt(v.link_cell[0])) * v.cell_w),
+            .f_y = @intFromFloat(pad_y + v.draw_frac + @as(f64, @floatFromInt(v.link_cell[1])) * v.cell_h),
+            .f_width = @intFromFloat(v.cell_w),
+            .f_height = @intFromFloat(v.cell_h),
+        };
+        peek.show(v.widget(), at, v.server, v.session_id, v.block_id, target);
+    }
+
+    /// Opens the link at a cell as Ctrl+click does; for the development script.
+    pub fn openLinkAt(v: *TermView, col: u16, row: u16) void {
+        const t = v.term() orelse return;
+        const url = v.linkAt(t, col, row) orelse return;
+        defer gpa.free(url);
+        v.link_cell = .{ col, row };
+        v.openLink(url);
+    }
+
+    fn isFileLink(url: []const u8) bool {
+        return std.mem.startsWith(u8, url, paths.prefix) or std.mem.startsWith(u8, url, "file://");
+    }
+
     fn menuOpenLink(v: *TermView) void {
         const l = v.menu_link orelse return;
+        v.link_cell = v.menu_cell;
         v.openLink(l);
     }
 
     /// Opens a link. Web, mail and file links open at once; one that opens an app, such as
     /// vscode:, asks first unless its scheme was trusted with Always Open.
     fn openLink(v: *TermView, url: [:0]const u8) void {
+        if (std.mem.startsWith(u8, url, paths.prefix)) return v.peekFile(url[paths.prefix.len..]);
+        if (std.mem.startsWith(u8, url, "file://")) {
+            // OSC 8 file links belong to this pane's host, not the desktop's filesystem.
+            const start = std.mem.indexOfScalarPos(u8, url, 7, '/') orelse return;
+            const encoded = gpa.dupeSentinel(u8, url[start..], 0) catch return;
+            defer gpa.free(encoded);
+            const path = glib.Uri.unescapeString(encoded.ptr, null) orelse return;
+            defer glib.free(path);
+            return v.peekFile(std.mem.span(path));
+        }
         const colon = std.mem.indexOfScalar(u8, url, ':') orelse return;
         const scheme = url[0..colon];
         const plain = for ([_][]const u8{ "http", "https", "mailto", "file" }) |w| {
@@ -1887,7 +2359,7 @@ pub const TermView = struct {
 
     fn menuCopyLink(v: *TermView) void {
         const l = v.menu_link orelse return;
-        v.widget().getClipboard().setText(l.ptr);
+        v.widget().getClipboard().setText(if (std.mem.startsWith(u8, l, paths.prefix)) l[paths.prefix.len..].ptr else l.ptr);
     }
 
     /// A selection was finished: it becomes the primary selection, and with Copy on select also
@@ -2166,6 +2638,137 @@ fn layoutOf(v: *TermView) *pango.Layout {
     setSpacing(l, v.spacing);
     v.layout = l;
     return l;
+}
+
+/// A file being sent to this pane's machine, as text that isn't typed yet: dim, in the cells
+/// after the cursor, where Rex will paste the file's path. It ends with the file's name, as the
+/// path will, and turns green from the left as the file goes. When the cursor isn't on screen
+/// it sits in the bottom corner instead.
+fn drawUploadGhost(v: *TermView, sn: *gtk.Snapshot, f: *const term_mod.Frame, f_font: Font, w: f64, h: f64) void {
+    v.upload_area = null;
+    v.upload_cancel = null;
+    const up = upload_ui.find(v.server, v.block_id) orelse {
+        _ = v.syncUploadHover();
+        return;
+    };
+    // The pane that began the upload has gone, and this one shows the same terminal.
+    if (up.watcher == null) {
+        up.watcher = .{ .ctx = v, .changed = TermView.uploadChanged };
+        v.upload_shown = up.fraction();
+    }
+
+    var status_buf: [8]u8 = undefined;
+    const status: []const u8 = if (up.finishing) "" else if (up.percent) |pc| std.fmt.bufPrint(&status_buf, "{d}%", .{pc}) catch "" else "";
+    var name_buf: [300]u8 = undefined;
+    const label = std.fmt.bufPrint(&name_buf, "…/{s}", .{up.name()}) catch "…/file";
+    // Cells after the name: a gap and the percentage, then a gap and the cancel button. Once
+    // everything is sent there is no button: a cancel could no longer tell whether the file
+    // arrived.
+    const status_cells: f64 = if (status.len > 0) @floatFromInt(1 + status.len) else 0;
+    const cancel_cells: f64 = if (up.finishing) 0 else 3;
+
+    const at_cursor = f.cursor_visible and f.cursor_y < f.rows and f.cursor_x < f.cols and f.scroll_offset + f.scroll_len >= f.scroll_total;
+    // A bar or an underline leaves its cell free for the text; a block or an outline fills it.
+    const style: c_int = switch (settings.current.cursor_style) {
+        .program => f.cursor_style,
+        .bar => 0,
+        .block => 1,
+        .underline => 2,
+    };
+    const beside = (style != 0 and style != 2) or v.widget().hasFocus() == 0;
+    var first: usize = @as(usize, f.cursor_x) + @intFromBool(beside);
+    var row: usize = f.cursor_y;
+    // Text with no room left on its line carries on at the start of the next, as typed text
+    // does. Eight cells of the name is the least that still says which file it is, and the
+    // room is reckoned for the longest percentage, so the text doesn't change lines halfway.
+    const least = 8 + 5 + 3;
+    if (at_cursor and @as(f64, @floatFromInt(@as(usize, f.cols) -| first)) < least and row + 1 < f.rows) {
+        first = 0;
+        row += 1;
+    }
+    const start = pad_x + @as(f64, @floatFromInt(first)) * v.cell_w;
+
+    const layout = layoutOf(v);
+    layout.setFontDescription(f_font.regular);
+    // A long name is shortened in the middle, to what the rest of the line has room for, so its
+    // start and its extension both show.
+    const room = if (at_cursor) @as(f64, @floatFromInt(@as(usize, f.cols) -| first)) * v.cell_w else w - 2 * pad_x;
+    const name_max = @max(v.cell_w * 8, @min(v.cell_w * 30, room - (status_cells + cancel_cells) * v.cell_w));
+    layout.setText(@ptrCast(label.ptr), @intCast(label.len));
+    layout.setWidth(@intFromFloat(name_max * pango.SCALE));
+    layout.setEllipsize(.middle);
+    var tw: c_int = 0;
+    var th: c_int = 0;
+    layout.getPixelSize(&tw, &th);
+    const name_w: f64 = @floatFromInt(tw);
+    // Everything after the name stays on the grid of cells.
+    const name_cells = @ceil(name_w / v.cell_w);
+    const cells = name_cells + status_cells + cancel_cells;
+    const width = cells * v.cell_w;
+
+    const right = w - pad_x - width;
+    const x = @max(pad_x, if (at_cursor) @min(start, right) else right);
+    const y = if (at_cursor) pad_y + @as(f64, @floatFromInt(row)) * v.cell_h else h - pad_y - v.cell_h;
+    if (cancel_cells > 0) {
+        v.upload_area = .{ x, y, width, v.cell_h };
+        v.upload_cancel = .{ x + width - 2 * v.cell_w, y, 2 * v.cell_w, v.cell_h };
+    }
+    _ = v.syncUploadHover();
+
+    // Over empty cells the text needs nothing behind it, which is what makes it part of the
+    // line. Anywhere else it covers what it is drawn over.
+    var covers = !at_cursor or x != start;
+    if (!covers) {
+        const until = @min(@as(usize, f.cols), first + @as(usize, @intFromFloat(cells)));
+        for (first..until) |col| {
+            const cp = f.cell(col, row).cp;
+            if (cp != 0 and cp != ' ') covers = true;
+        }
+    }
+    if (covers) fillRect(sn, f.bg, 1, x, y, width, v.cell_h);
+    if (v.upload_hover) {
+        const area: graphene.Rect = .{ .f_origin = .{ .f_x = @floatCast(x), .f_y = @floatCast(y) }, .f_size = .{ .f_width = @floatCast(width), .f_height = @floatCast(v.cell_h) } };
+        var shape: gsk.RoundedRect = undefined;
+        _ = shape.initFromRect(&area, 3);
+        sn.pushRoundedClip(&shape);
+        fillRect(sn, f.fg, 0.1, x, y, width, v.cell_h);
+        if (v.upload_hand) fillRect(sn, f.fg, 0.14, x + width - 2 * v.cell_w, y, 2 * v.cell_w, v.cell_h);
+        sn.pop();
+    }
+
+    const ink = rgba(f.fg, 1);
+    const dim = rgba(f.fg, 0.42);
+    // Green enough to read on this background when the theme has none of its own.
+    const green: u32 = if (theme_green != 0) theme_green else if (luminance(f.bg) > 0.4) 0x1f7a34 else 0x8ae234;
+    // Only the pane that is told of the file's progress eases toward it.
+    const eased = if (up.watcher) |watcher| watcher.ctx == @as(*anyopaque, @ptrCast(v)) else false;
+    const done = std.math.clamp(if (eased) v.upload_shown else up.fraction(), 0, 1);
+    layoutOnBaseline(sn, layout, dim, x, y + v.baseline);
+    // The green part ends softly, over a cell and a half, in strips that each show less of it.
+    const edge = name_w * done;
+    const soft = @min(v.cell_w * 1.5, edge);
+    const strips = 6;
+    for (0..strips + 1) |i| {
+        const from = if (i == 0) 0 else edge - soft + soft * @as(f64, @floatFromInt(i - 1)) / strips;
+        const to = if (i == 0) edge - soft else edge - soft + soft * @as(f64, @floatFromInt(i)) / strips;
+        if (to <= from) continue;
+        const alpha = if (i == 0) 1 else 1 - @as(f64, @floatFromInt(i)) / (strips + 1);
+        sn.pushClip(&.{ .f_origin = .{ .f_x = @floatCast(x + from), .f_y = @floatCast(y) }, .f_size = .{ .f_width = @floatCast(to - from), .f_height = @floatCast(v.cell_h) } });
+        layoutOnBaseline(sn, layout, rgba(green, alpha), x, y + v.baseline);
+        sn.pop();
+    }
+    // The layout is shared with everything else the pane draws, which is never shortened.
+    layout.setWidth(-1);
+    layout.setEllipsize(.none);
+    if (status.len > 0) {
+        layout.setText(@ptrCast(status.ptr), @intCast(status.len));
+        layoutOnBaseline(sn, layout, dim, x + (name_cells + 1) * v.cell_w, y + v.baseline);
+    }
+    if (v.upload_hover) {
+        layout.setText("×", -1);
+        layout.getPixelSize(&tw, &th);
+        layoutOnBaseline(sn, layout, ink, x + width - v.cell_w - @as(f64, @floatFromInt(tw)) / 2, y + v.baseline);
+    }
 }
 
 /// A pane with no terminal to show yet, or any more: the theme's background, so a pane that
@@ -2888,6 +3491,8 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
             },
         }
     }
+
+    drawUploadGhost(v, sn, f, f_font, w, h);
 
     // What an input method is still composing: at the cursor, underlined, until it's committed.
     if (v.preedit) |pre| if (f.cursor_y < f.rows and f.cursor_x < f.cols) {

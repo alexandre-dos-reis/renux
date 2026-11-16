@@ -86,6 +86,8 @@ pub const Settings = struct {
     /// Ctrl+click on a link in a remote host's pane opens it on this computer, even when the
     /// program there takes the mouse and would open it on its own host.
     remote_links_here: bool = true,
+    /// What opens a file named in a pane, typed at a shell: `{path}` and `{line}` are filled in.
+    editor_command: []u8,
     /// The overview shows each session's tabs together under its name.
     overview_by_session: bool = false,
     /// The close, minimize and maximize buttons in the window's top left corner are shown.
@@ -244,6 +246,7 @@ const ranges = [_]struct { []const u8, f64, f64 }{
 const texts = [_][2][]const u8{
     .{ "font", "Monospace 11" },
     .{ "theme_light", "Solarized Light" },
+    .{ "editor_command", "nvim +{line} {path}" },
 };
 
 const fields = @typeInfo(Settings).@"struct";

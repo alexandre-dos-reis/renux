@@ -148,6 +148,13 @@ pub const Socket = struct {
         return s.sendFrame(0x2, data);
     }
 
+    /// Bytes still queued, not an acknowledgement from the peer. The writer may hold a batch too.
+    pub fn queuedBytes(s: *Socket) usize {
+        s.lock.lock();
+        defer s.lock.unlock();
+        return s.out_bytes;
+    }
+
     fn ref(s: *Socket) void {
         _ = s.refs.fetchAdd(1, .monotonic);
     }

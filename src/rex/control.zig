@@ -68,6 +68,7 @@ pub const Control = struct {
     label: []u8,
     version: []u8,
     token: ?[]u8,
+    revision: u32,
     welcomed: bool = false,
     /// The socket closed by itself and is already gone.
     socket_done: bool = false,
@@ -75,7 +76,7 @@ pub const Control = struct {
     /// inside the call that dropped it, so a callback may drop the control it was called by.
     dead: bool = false,
 
-    pub fn open(url: []const u8, label: []const u8, version: []const u8, reconnect_token: ?[]const u8, listener: Listener) !*Control {
+    pub fn open(url: []const u8, label: []const u8, version: []const u8, reconnect_token: ?[]const u8, revision: u32, listener: Listener) !*Control {
         const c = try gpa.create(Control);
         errdefer gpa.destroy(c);
         const own_label = try gpa.dupe(u8, label[0..@min(label.len, 48)]);
@@ -84,7 +85,7 @@ pub const Control = struct {
         errdefer gpa.free(own_version);
         const own_token = if (reconnect_token) |t| try gpa.dupe(u8, t) else null;
         errdefer if (own_token) |t| gpa.free(t);
-        c.* = .{ .socket = undefined, .listener = listener, .label = own_label, .version = own_version, .token = own_token };
+        c.* = .{ .socket = undefined, .listener = listener, .label = own_label, .version = own_version, .token = own_token, .revision = revision };
         c.socket = try ws.Socket.open(.{ .url = url, .path = "/api/control", .protocol = protocol }, .{
             .ctx = c,
             .on_open = onOpen,
@@ -205,7 +206,7 @@ fn onOpen(ctx: *anyopaque) void {
     const c: *Control = @ptrCast(@alignCast(ctx));
     const hello = std.json.Stringify.valueAlloc(gpa, .{
         .type = "hello",
-        .api_revision = api_revision,
+        .api_revision = c.revision,
         .reconnect_token = c.token,
         .client = .{
             .kind = "app",

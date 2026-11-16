@@ -116,6 +116,21 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{ .root_module = mod });
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);
+
+    const upload_tests = b.addTest(.{ .root_module = mod, .filters = &.{"upload integration"} });
+    const upload_check = b.addSystemCommand(&.{ "python3", "scripts/test-uploads.py" });
+    upload_check.addArtifactArg(upload_tests);
+    b.step("test-upload", "Test uploads against a disposable Rex server (needs rex and python3)").dependOn(&upload_check.step);
+
+    const clipboard_tests = b.addTest(.{ .root_module = mod, .filters = &.{"clipboard upload integration"} });
+    const clipboard_check = b.addSystemCommand(&.{ "python3", "scripts/test-uploads.py", "--clipboard" });
+    clipboard_check.addArtifactArg(clipboard_tests);
+    b.step("test-clipboard", "Test clipboard paste in GTK against isolated Rex (needs gtk4-broadwayd)").dependOn(&clipboard_check.step);
+
+    const preview_tests = b.addTest(.{ .root_module = mod, .filters = &.{"preview integration"} });
+    const preview_check = b.addSystemCommand(&.{ "python3", "scripts/test-uploads.py", "--preview" });
+    preview_check.addArtifactArg(preview_tests);
+    b.step("test-preview", "Test downloads and GTK previews against isolated Rex").dependOn(&preview_check.step);
 }
 
 /// Clears what the binding modules link. The bindings import each other, so it tracks what it saw.

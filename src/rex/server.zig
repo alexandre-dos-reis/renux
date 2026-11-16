@@ -187,6 +187,8 @@ pub const Server = struct {
     }
 
     pub fn destroy(s: *Server) void {
+        @import("upload.zig").cancelForServer(s);
+        @import("download.zig").cancelForServer(s);
         if (std.mem.indexOfScalar(*const Server, live.items, s)) |i| _ = live.swapRemove(i);
         s.wanted = false;
         s.observer = null;
@@ -265,7 +267,7 @@ pub const Server = struct {
 
     fn startConnecting(s: *Server) void {
         s.setState(.connecting, "");
-        const c = Control.open(s.url, s.client_label, version, s.reconnect_token, .{
+        const c = Control.open(s.url, s.client_label, version, s.reconnect_token, control.api_revision, .{
             .ctx = s,
             .on_welcome = onWelcome,
             .on_event = onEvent,
@@ -1240,6 +1242,22 @@ pub const Server = struct {
             },
             .err => |e| s.showMessage(e.message),
         }
+    }
+
+    /// Splits the pane showing `anchor_id` and types a command into the new pane's shell. The
+    /// new pane goes after the old one: to its right, or below it.
+    pub fn newSplitRunning(s: *Server, session_id: []const u8, anchor_id: []const u8, horizontal: bool, text: []const u8) void {
+        s.call("session.new_split", .{
+            .session_id = session_id,
+            .anchor_id = anchor_id,
+            .direction = if (horizontal) "horizontal" else "vertical",
+            .side = "after",
+            .layout = s.shellIn(anchor_id),
+            .focus = true,
+        }, Running, .{
+            .session_id = gpa.dupe(u8, session_id) catch return,
+            .text = gpa.dupe(u8, text) catch return,
+        }, runningWindowMade);
     }
 
     /// Folders (and files, if asked) in a directory as the terminal's shell sees it.

@@ -98,7 +98,14 @@ test {
     _ = @import("rex/stream.zig");
     _ = @import("rex/server.zig");
     _ = @import("rex/updates.zig");
+    _ = @import("rex/upload.zig");
+    _ = @import("rex/download.zig");
+    _ = @import("terminal/paths.zig");
+    _ = @import("ui/preview.zig");
+    _ = @import("ui/peek.zig");
+    _ = @import("ui/highlight.zig");
     _ = @import("terminal/keys.zig");
+    _ = @import("terminal/termview.zig");
     _ = @import("theme/theme.zig");
     _ = @import("terminal/boxdraw.zig");
     _ = @import("terminal/links.zig");

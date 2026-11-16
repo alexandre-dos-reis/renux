@@ -367,7 +367,7 @@ pub const Stream = struct {
 
 /// The opening message for a ticket, or null unless the ticket is exactly the 16 bytes the
 /// protocol carries: the decoder itself doesn't check that what it decodes fits.
-fn helloFor(ticket: []const u8) ?[17]u8 {
+pub fn helloFor(ticket: []const u8) ?[17]u8 {
     const decoder = std.base64.url_safe_no_pad.Decoder;
     const text = std.mem.trimEnd(u8, ticket, "=");
     var hello: [17]u8 = @splat(0);
