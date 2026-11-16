@@ -1,6 +1,6 @@
 //! A small look at a file named in a pane, shown by its path: what the file is, the lines
-//! around the one named, or a small picture. Enter opens the file in an editor in a new pane
-//! to the right, and Shift+Enter in a new window.
+//! around the one named, or a picture. Enter opens the file in an editor in a new pane to
+//! the right, and Shift+Enter in a new window. A picture goes to the desktop's own viewer.
 const std = @import("std");
 const gtk = @import("gtk");
 const gio = @import("gio");
@@ -230,7 +230,7 @@ const Peek = struct {
     }
 
     /// Whether the keys start the editor. Until the file has arrived its name decides, so a
-    /// key works at once; a file that turns out not to be text opens in the preview instead.
+    /// key works at once; a file that turns out not to be text goes to the desktop's apps.
     fn edits(p: *const Peek) bool {
         return switch (p.kind) {
             .text => true,
@@ -246,7 +246,8 @@ const Peek = struct {
         const missing = p.kind == .failed and p.resolved == null;
         const editing = p.edits();
         var buf: [96]u8 = undefined;
-        const text: [:0]const u8 = if (editing) std.fmt.bufPrintSentinel(&buf, "Open in {s}", .{editorName()}, 0) catch "Open in Editor" else "Open Preview";
+        const picture = p.kind == .image or (p.kind == .loading and looksLikeImage(p.path));
+        const text: [:0]const u8 = if (editing) std.fmt.bufPrintSentinel(&buf, "Open in {s}", .{editorName()}, 0) catch "Open in Editor" else if (picture) "Open" else "Open With…";
         p.primary_label.setText(text.ptr);
         p.primary.as(gtk.Widget).setSensitive(@intFromBool(!missing));
         offer(p.second, editing);
@@ -255,11 +256,7 @@ const Peek = struct {
     fn located(ctx: *anyopaque, path: []const u8) void {
         const p: *Peek = @ptrCast(@alignCast(ctx));
         if (p.resolved == null) p.resolved = gpa.dupe(u8, path) catch null;
-        if (p.waiting == null) return;
-        // Acting closes the peek and with it this download, which is in the middle of
-        // telling us this, so the key is acted on once it has finished.
-        p.refs += 1;
-        _ = glib.idleAdd(&resume_, p);
+        p.resumeLater();
     }
 
     fn resume_(data: ?*anyopaque) callconv(.c) c_int {
@@ -275,13 +272,15 @@ const Peek = struct {
         const p: *Peek = @ptrCast(@alignCast(ctx));
         p.transfer = null;
         if (p.gone) return;
+        p.resumeLater();
         const data = bytes orelse return p.fail(detail);
         var buf: [32]u8 = undefined;
         p.meta.setText(sizeText(&buf, data.len).ptr);
+        // Kept for the worker that decodes a picture, and for the copy another app is given.
+        p.data = glib.Bytes.new(data.ptr, data.len);
         if (preview.imageSize(data)) |size| {
             if (size[0] > 0 and size[1] > 0 and size[0] <= 16384 and size[1] <= 16384 and @as(u64, size[0]) * size[1] <= 32 * 1024 * 1024) {
                 // Decoding a large picture takes a moment, which a worker spends instead.
-                p.data = glib.Bytes.new(data.ptr, data.len);
                 p.refs += 1;
                 const task = gio.Task.new(p.pop.as(gobject.Object), null, &decoded, p);
                 task.setTaskData(p, null);
@@ -425,9 +424,8 @@ const Peek = struct {
         if (p.gone or !p.server.isLive()) return;
         if (p.kind == .failed and p.resolved == null) return;
         const editing = p.edits();
-        // A new pane's shell may start in another folder, where a path such as src/main.zig
-        // names nothing. Rex says where the file is a moment after the download begins.
-        if (editing and p.resolved == null and p.transfer != null and p.path[0] != '/' and p.path[0] != '~') {
+        // A key pressed before what it needs has arrived is kept, and acted on when it has.
+        if (!p.ready(editing)) {
             p.waiting = how;
             return;
         }
@@ -435,11 +433,67 @@ const Peek = struct {
         p.refs += 1;
         defer p.unref();
         const parent = p.parent;
-        if (editing) p.edit(how) else preview.show(parent, p.server, p.sid, p.bid, p.path);
+        if (editing) p.edit(how) else p.openOutside();
         if (p.popped) p.pop.popdown() else p.leave();
         if (!editing) return;
         // The new pane takes the keyboard; until it is there the old one keeps it.
         _ = parent.grabFocus();
+    }
+
+    /// Whether a key can be acted on yet. An editor in a new pane needs the file's whole
+    /// path, as its shell may start in another folder, where a path such as src/main.zig
+    /// names nothing; Rex says where the file is a moment after the download begins. An app
+    /// on this computer needs the file itself, or all of a copy of it.
+    fn ready(p: *const Peek, editing: bool) bool {
+        if (p.transfer == null) return true;
+        if (editing) return p.resolved != null or p.path[0] == '/' or p.path[0] == '~';
+        return p.resolved != null and p.onThisComputer();
+    }
+
+    fn onThisComputer(p: *const Peek) bool {
+        return std.mem.startsWith(u8, p.server.url, "unix://");
+    }
+
+    /// Acts on a key that was kept, once this turn of the main loop is over: what brings the
+    /// news may still be in the middle of using the peek.
+    fn resumeLater(p: *Peek) void {
+        if (p.waiting == null) return;
+        p.refs += 1;
+        _ = glib.idleAdd(&resume_, p);
+    }
+
+    /// Hands the file to the desktop: the app it opens pictures with, or its list of apps for
+    /// a file there is nothing to show of here.
+    fn openOutside(p: *Peek) void {
+        const file = p.fileHere() orelse return;
+        defer file.unref();
+        const launcher = gtk.FileLauncher.new(file);
+        defer launcher.unref();
+        const picture = p.kind == .image or (p.kind == .loading and looksLikeImage(p.path));
+        launcher.setAlwaysAsk(@intFromBool(!picture));
+        const window: ?*gtk.Window = if (p.parent.getRoot()) |root| @ptrCast(@alignCast(root)) else null;
+        launcher.launch(window, null, null, null);
+    }
+
+    /// The file as an app on this computer can open it: the file itself when the pane is on
+    /// this computer, and otherwise a copy under its own name, in a folder of its own that
+    /// only this user can read. The copy is left for the system to clear away, as the app
+    /// may go on reading it.
+    fn fileHere(p: *Peek) ?*gio.File {
+        if (p.onThisComputer()) if (p.resolved) |whole| {
+            const z = gpa.dupeSentinel(u8, whole, 0) catch return null;
+            defer gpa.free(z);
+            return gio.File.newForPath(z.ptr);
+        };
+        const data = p.data orelse return null;
+        const dir = glib.Dir.makeTmp("renux-peek-XXXXXX", null) orelse return null;
+        defer glib.free(dir);
+        const base = if (std.mem.lastIndexOfScalar(u8, p.path, '/')) |slash| p.path[slash + 1 ..] else p.path;
+        const to = std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ std.mem.span(dir), base }, 0) catch return null;
+        defer gpa.free(to);
+        const raw = data.getData(null) orelse "";
+        if (glib.fileSetContents(to.ptr, raw, @intCast(data.getSize()), null) == 0) return null;
+        return gio.File.newForPath(to.ptr);
     }
 
     /// Starts the editor by typing its command at the shell of a new pane to the right of

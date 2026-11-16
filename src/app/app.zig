@@ -3814,8 +3814,13 @@ pub const App = struct {
         block_id: []u8,
         /// Set when the name is for a session about to be created.
         create: bool = false,
+        /// For a new session with more than one host to put it on: the list to pick from, and
+        /// the hosts it names, in its order.
+        picker: ?*gtk.DropDown = null,
+        choices: []HostRef = &.{},
 
         fn free(ctx: *RenameCtx) void {
+            gpa.free(ctx.choices);
             gpa.free(ctx.session_id);
             gpa.free(ctx.window_id);
             gpa.free(ctx.block_id);
@@ -3847,9 +3852,15 @@ pub const App = struct {
         defer ctx.free();
         if (!std.mem.eql(u8, std.mem.span(response), "rename")) return;
         const label = std.mem.trim(u8, std.mem.span(ctx.entry.as(gtk.Editable).getText()), " ");
+        if (ctx.create) {
+            // The host picked in the dialog, which starts on the one shown when it opened.
+            const picked = if (ctx.picker) |list| list.getSelected() else 0;
+            const h = ctx.app.liveHost(if (picked < ctx.choices.len) ctx.choices[picked] else ctx.host) orelse return;
+            ctx.app.selectHost(h);
+            return h.server.createSession(label);
+        }
         // The host the dialog was opened for, even if another is shown by now.
         const s = (ctx.app.liveHost(ctx.host) orelse return).server;
-        if (ctx.create) return s.createSession(label);
         if (ctx.block_id.len > 0) return s.renameBlock(ctx.session_id, ctx.block_id, label);
         // No window means the session itself is renamed.
         if (ctx.window_id.len == 0) s.renameSession(ctx.session_id, label) else s.renameWindow(ctx.session_id, ctx.window_id, label);
@@ -3864,7 +3875,7 @@ pub const App = struct {
         entry.as(gtk.Editable).setText(z.ptr);
         if (placeholder) |p| entry.setPlaceholderText(p.ptr);
         entry.setActivatesDefault(1);
-        dialog.setExtraChild(entry.as(gtk.Widget));
+        dialog.setExtraChild(if (ctx.create) a.withHostPicker(ctx, entry) else entry.as(gtk.Widget));
         dialog.addResponse("cancel", "Cancel");
         dialog.addResponse("rename", ok.ptr);
         dialog.setResponseAppearance("rename", .suggested);
@@ -3873,6 +3884,50 @@ pub const App = struct {
         _ = adw.AlertDialog.signals.response.connect(dialog, *RenameCtx, &renamed, ctx, .{});
         dialog.as(adw.Dialog).present(a.window.as(gtk.Widget));
         _ = entry.as(gtk.Widget).grabFocus();
+    }
+
+    /// A new session's name field with, under it, the host to make the session on, when
+    /// there is more than one connected. It starts on the host being shown, which is where
+    /// the person was typing.
+    fn withHostPicker(a: *App, ctx: *RenameCtx, entry: *gtk.Entry) *gtk.Widget {
+        var names: std.ArrayList(?[*:0]const u8) = .empty;
+        var refs: std.ArrayList(HostRef) = .empty;
+        defer {
+            for (names.items) |n| if (n) |z| gpa.free(std.mem.span(z));
+            names.deinit(gpa);
+            refs.deinit(gpa);
+        }
+        var shown: u32 = 0;
+        for (a.hosts.items) |h| {
+            if (h != a.current and h.server.state != .online) continue;
+            const z = gpa.dupeSentinel(u8, h.label, 0) catch continue;
+            names.append(gpa, z.ptr) catch {
+                gpa.free(z);
+                continue;
+            };
+            refs.append(gpa, refHost(h)) catch {
+                gpa.free(z);
+                _ = names.pop();
+                continue;
+            };
+            if (h == a.current) shown = @intCast(refs.items.len - 1);
+        }
+        if (refs.items.len < 2) return entry.as(gtk.Widget);
+        names.append(gpa, null) catch return entry.as(gtk.Widget);
+        ctx.choices = gpa.dupe(HostRef, refs.items) catch return entry.as(gtk.Widget);
+        const list = gtk.DropDown.newFromStrings(@ptrCast(names.items.ptr));
+        list.setSelected(shown);
+        list.as(gtk.Widget).setHexpand(1);
+        ctx.picker = list;
+        const row = gtk.Box.new(.horizontal, 10);
+        const caption = gtk.Label.new("On");
+        caption.as(gtk.Widget).addCssClass("dim-label");
+        row.append(caption.as(gtk.Widget));
+        row.append(list.as(gtk.Widget));
+        const box = gtk.Box.new(.vertical, 10);
+        box.append(entry.as(gtk.Widget));
+        box.append(row.as(gtk.Widget));
+        return box.as(gtk.Widget);
     }
 
     // Find: each pane has its own bar; these act on the highlighted pane's.
@@ -4207,6 +4262,9 @@ pub const App = struct {
     }
 
     fn newWindowIn(a: *App, session_id: []const u8) void {
+        // The sidebar lists every host's sessions, so the session may be on another host than
+        // the one shown. Asked of the shown host, its server knows no such session.
+        if (a.hostOfSession(session_id)) |h| a.selectHost(h);
         const s = a.server orelse return;
         a.auto_picked = false;
         setSlot(&a.session_id, session_id);

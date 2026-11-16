@@ -52,15 +52,20 @@ pub fn at(a: std.mem.Allocator, rows: []const []const u21, wraps: []const bool, 
         var number: [2]usize = .{ 0, 0 };
         if (!quoted) {
             while (end > start and std.mem.indexOfScalar(u21, &.{ ',', ';', ':', ')', ']', '}', '.', '*' }, line[end - 1]) != null) end -= 1;
-            // Compiler-style path:line[:column].
-            var n = end;
-            while (n > start and (line[n - 1] >= '0' and line[n - 1] <= '9' or line[n - 1] == ':')) n -= 1;
-            if (n < end and n > start and line[n] == ':') {
-                // The line is kept, after the path: no path here has a colon of its own.
+            // Compiler-style path:line[:column], and a range of lines as coding agents write
+            // it, path:line-line. No path here has a colon of its own, so the first one ends
+            // the path, and the line after it is kept.
+            if (std.mem.indexOfScalar(u21, line[start..end], ':')) |colon| {
+                const n = start + colon;
                 var digits = n + 1;
                 while (digits < end and line[digits] >= '0' and line[digits] <= '9') digits += 1;
-                number = .{ n + 1, digits };
-                end = n;
+                const numbers_only = for (line[digits..end]) |c| {
+                    if (!(c >= '0' and c <= '9') and c != ':' and c != '-') break false;
+                } else true;
+                if (n > start and digits > n + 1 and numbers_only) {
+                    number = .{ n + 1, digits };
+                    end = n;
+                }
             }
         }
         if (hit >= start and hit < end) {
@@ -92,6 +97,89 @@ pub fn at(a: std.mem.Allocator, rows: []const []const u21, wraps: []const bool, 
     return null;
 }
 
+/// What a link made by a program points at, when that is a file and not an address on the
+/// web: `prefix`, the path, and `:LINE` when the link names a line, as `path:42`, `path#L42`
+/// or a `file://` address does. Coding agents link the files they mention this way, most
+/// often with no more than a path. Null for anything with another scheme. The caller frees it.
+pub fn fromHref(a: std.mem.Allocator, href: []const u8) !?[]u8 {
+    var rest = href;
+    if (std.ascii.startsWithIgnoreCase(rest, "file://")) {
+        rest = rest["file://".len..];
+        // Past the host, which is empty or this machine's name.
+        rest = rest[std.mem.indexOfScalar(u8, rest, '/') orelse return null ..];
+    } else if (schemeOf(rest)) return null;
+    var line: []const u8 = "";
+    if (std.mem.indexOfScalar(u8, rest, '#')) |hash| {
+        // #L42 and #L42-L50, as code hosts write them.
+        const mark = std.mem.trimStart(u8, rest[hash + 1 ..], "Ll");
+        line = mark[0 .. std.mem.indexOfNone(u8, mark, "0123456789") orelse mark.len];
+        rest = rest[0..hash];
+    }
+    if (std.mem.indexOfScalar(u8, rest, '?')) |query| rest = rest[0..query];
+    if (std.mem.indexOfScalar(u8, rest, ':')) |colon| {
+        const after = rest[colon + 1 ..];
+        const digits = after[0 .. std.mem.indexOfNone(u8, after, "0123456789") orelse after.len];
+        if (digits.len == 0 or std.mem.indexOfNone(u8, after, "0123456789:-") != null) return null;
+        line = digits;
+        rest = rest[0..colon];
+    }
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    try out.appendSlice(a, prefix);
+    var i: usize = 0;
+    while (i < rest.len) : (i += 1) {
+        // %20 and the like are read back into the characters they stand for.
+        const byte: ?u8 = if (rest[i] == '%' and i + 2 < rest.len) std.fmt.parseInt(u8, rest[i + 1 .. i + 3], 16) catch null else null;
+        if (byte) |b| {
+            try out.append(a, b);
+            i += 2;
+        } else try out.append(a, rest[i]);
+    }
+    const path = out.items[prefix.len..];
+    if (path.len == 0 or std.mem.indexOfAny(u8, path, ":\n\x00") != null) {
+        out.deinit(a);
+        return null;
+    }
+    if (line.len > 0) {
+        try out.append(a, ':');
+        try out.appendSlice(a, line);
+    }
+    return try out.toOwnedSlice(a);
+}
+
+/// Whether a link starts with a scheme, as https: and mailto: do. A name followed by a line
+/// number, as in main.zig:42, isn't one.
+fn schemeOf(href: []const u8) bool {
+    const colon = std.mem.indexOfScalar(u8, href, ':') orelse return false;
+    if (colon < 2 or colon + 1 >= href.len or std.ascii.isDigit(href[colon + 1])) return false;
+    if (!std.ascii.isAlphabetic(href[0])) return false;
+    for (href[0..colon]) |c| if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-') return false;
+    return true;
+}
+
+test "links to files are told from links to the web" {
+    const a = std.testing.allocator;
+    const cases = [_]struct { href: []const u8, want: ?[]const u8 }{
+        .{ .href = "src/main.zig", .want = "src/main.zig" },
+        .{ .href = "src/main.zig:42", .want = "src/main.zig:42" },
+        .{ .href = "src/main.zig:42:7", .want = "src/main.zig:42" },
+        .{ .href = "main.zig:42-50", .want = "main.zig:42" },
+        .{ .href = "src/main.zig#L42-L50", .want = "src/main.zig:42" },
+        .{ .href = "./my%20notes/a.md", .want = "./my notes/a.md" },
+        .{ .href = "file:///home/me/a%20b.png", .want = "/home/me/a b.png" },
+        .{ .href = "file://host/tmp/x.txt#L3", .want = "/tmp/x.txt:3" },
+        .{ .href = "https://example.com/a.png", .want = null },
+        .{ .href = "mailto:me@example.com", .want = null },
+        .{ .href = "vscode://file/tmp/x", .want = null },
+        .{ .href = "#section", .want = null },
+    };
+    for (cases) |c| {
+        const got = try fromHref(a, c.href);
+        defer if (got) |g| a.free(g);
+        if (c.want) |w| try std.testing.expectEqualStrings(w, got.?[prefix.len..]) else try std.testing.expect(got == null);
+    }
+}
+
 test "file candidates reject URLs and ordinary words" {
     for ([_][]const u8{ "./out.png", "~/a.txt", "/tmp/file", "src/main.zig", "README.md", ".gitignore" }) |s| try std.testing.expect(candidate(s));
     for ([_][]const u8{ "hello", "3.14", "https://example.com/a.png", "www.example.com", "a\nb.txt" }) |s| try std.testing.expect(!candidate(s));
@@ -102,6 +190,8 @@ test "quoted paths soft wraps and line suffixes" {
     const cases = [_]struct { text: []const u8, hit: usize, path: []const u8 }{
         .{ .text = "see './my file.png' now", .hit = 12, .path = "./my file.png" },
         .{ .text = "(src/main.zig:42:7)", .hit = 6, .path = "src/main.zig:42" },
+        .{ .text = "edit src/rex/server.zig:417-430", .hit = 8, .path = "src/rex/server.zig:417" },
+        .{ .text = "see src/v2:10 there", .hit = 5, .path = "src/v2:10" },
         .{ .text = "created /tmp/result.png,", .hit = 14, .path = "/tmp/result.png" },
         .{ .text = "**./output.png**", .hit = 7, .path = "./output.png" },
     };

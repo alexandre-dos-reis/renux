@@ -2150,10 +2150,46 @@ pub const TermView = struct {
     /// The link at a cell: an OSC 8 hyperlink, or a web address written in the text.
     fn linkAt(v: *TermView, t: *term_mod.Term, col: u16, row: u16) ?[:0]u8 {
         _ = v;
-        if (t.hyperlinkAt(col, row)) |u| return u;
+        if (t.hyperlinkAt(col, row)) |u| {
+            // Coding agents link the files they mention, often by a bare path such as
+            // src/main.zig: that is a file on the pane's host, not an address to open.
+            const file = (paths.fromHref(gpa, u) catch null) orelse return u;
+            defer gpa.free(file);
+            defer gpa.free(u);
+            // The link seldom says which line; the text after it often does, as in the
+            // src/main.zig:42-60 of a tool's own report, where only the path is the link.
+            const named = std.mem.indexOfScalar(u8, file[paths.prefix.len..], ':') != null;
+            const line: ?u32 = if (named) null else lineAfterLink(t, u, col, row);
+            var buf: [16]u8 = undefined;
+            const suffix = if (line) |n| std.fmt.bufPrint(&buf, ":{d}", .{n}) catch "" else "";
+            return std.mem.concatWithSentinel(gpa, u8, &.{ file, suffix }, 0) catch null;
+        }
         var link = textLinkAt(t, col, row) orelse return null;
         defer link.deinit(gpa);
         return gpa.dupeSentinel(u8, link.url, 0) catch null;
+    }
+
+    /// The line number written straight after a program's link on its row, as `:42`.
+    fn lineAfterLink(t: *term_mod.Term, uri: []const u8, col: u16, row: u16) ?u32 {
+        const f = &t.frame;
+        if (row >= f.rows) return null;
+        // The link's last cell: the cells after `col` that point at the same place.
+        var x: usize = col;
+        while (x + 1 < f.cols) : (x += 1) {
+            const next = t.hyperlinkAt(@intCast(x + 1), row) orelse break;
+            defer gpa.free(next);
+            if (!std.mem.eql(u8, next, uri)) break;
+        }
+        x += 1;
+        if (x >= f.cols or f.cell(x, row).cp != ':') return null;
+        var n: u32 = 0;
+        var digits: usize = 0;
+        while (x + 1 + digits < f.cols and digits < 7) : (digits += 1) {
+            const cp = f.cell(x + 1 + digits, row).cp;
+            if (cp < '0' or cp > '9') break;
+            n = n * 10 + @as(u32, @intCast(cp - '0'));
+        }
+        return if (digits == 0 or n == 0) null else n;
     }
 
     /// The web address written in the text at a cell, with the cells it covers.

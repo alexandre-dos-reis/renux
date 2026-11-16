@@ -7,11 +7,17 @@
   picture as tall as those lines. Web URLs still open the browser. OSC 8 `file://` links peek at files on the
   pane's host. The context menu's **Preview Selected Path** still opens the full preview.
 - In the peek, Enter opens a text file in an editor in a new pane to the right of the pane
-  that named it, and Shift+Enter in a new window. For a picture or a file with no peek, Enter
-  opens the full preview. The editor is started by typing the **Editor command** setting
+  that named it, and Shift+Enter in a new window. A picture goes to the desktop's own
+  app for pictures, and a file with no peek to its list of apps. A file on this computer is
+  opened where it is; one on another host as a private copy under its own name. The editor is started by typing the **Editor command** setting
   (`nvim +{line} {path}` by default) at the new pane's shell, so on a remote pane it runs on
   that host and nothing is downloaded for it. The command gets the file's whole path, which
   Rex reports as the download begins; a key pressed before that waits for it.
+- Coding agents link the files they mention, and most give the link a bare path such as
+  `src/main.zig` or `src/main.zig#L42` and no scheme. Those are files on the pane's host and
+  open the peek, like `file://` links. When only the path is the link, as in a tool's
+  `read src/main.zig:410-420`, the line written after it is used. A range of lines after a
+  path in plain text, `path:417-430`, is read as its first line.
 - The lines are colored by `src/ui/highlight.zig`: comments, strings, numbers and each
   language's own words, in the pane's terminal colors. It reads words and marks only, with no
   grammar, so a comment or string that began on an earlier line isn't known to it.
