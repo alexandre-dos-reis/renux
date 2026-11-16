@@ -5008,7 +5008,7 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
             defer gpa.free(sent);
             const file = gio.File.newForPath(sent.ptr);
             defer file.unref();
-            _ = tv.upload(file, false);
+            _ = tv.upload(&.{file}, false);
         } else if (std.mem.eql(u8, cmd, "sidebar")) {
             if (a.split.getSidebar()) |sb| std.log.info("sidebar was {d} wide (asked {d:.0}, min {d:.0}, max {d:.0}, room {d}, header {d})", .{ sb.getWidth(), a.split.getMaxSidebarWidth(), a.split.getMinSidebarWidth(), a.split.getMaxSidebarWidth(), a.header_room.getWidth(), a.side_header.getWidth() });
             a.setSidebarWidth(std.fmt.parseFloat(f64, it.next() orelse "250") catch 250);

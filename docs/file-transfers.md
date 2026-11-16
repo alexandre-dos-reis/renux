@@ -131,7 +131,7 @@ Android client's chosen file-size limits as Rex server limits.
 
 ## Implemented first increment
 
-**One file dropped or pasted onto a remote pane is uploaded; local files insert their path.**
+**Files dropped or pasted onto a remote pane are uploaded; local files insert their paths.**
 
 - [`TermView.onDrop` and clipboard paste](../src/terminal/termview.zig) share the same file
   handler, routing non-Unix-socket connections to upload. This conservatively copies even
@@ -140,7 +140,7 @@ Android client's chosen file-size limits as Rex server limits.
 - Clipboard paste prefers original files (`GdkFileList` or `text/uri-list`), then image data,
   then ordinary text. Use Ctrl+Shift+V or the context menu's Paste. Coding-agent panes also
   handle Ctrl+V for files/images; plain-text Ctrl+V and shell literal-next remain untouched.
-  Multiple files are rejected explicitly; normal text and its multiline safeguards are unchanged.
+  Several files go together, as one batch; normal text and its multiline safeguards are unchanged.
 - Clipboard images are read with GDK and encoded as PNG on a GIO worker, never blocking
   typing/rendering. Their temporary files are private (0600). Remote uploads remove the local
   source on completion, cancellation, or failure. Local pastes retain their image under the
@@ -149,6 +149,12 @@ Android client's chosen file-size limits as Rex server limits.
 - [`src/rex/upload.zig`](../src/rex/upload.zig) opens an isolated revision-11 control
   connection, attaches to the session, reserves the upload, and sends asynchronously read
   chunks over `rex.data.bytes.v1`. The terminal connection stays at revision 10.
+- Several files are one upload: the same control connection reserves each in turn with the
+  batch's ID, its place and the count, and sends it on a byte stream of its own. Rex pastes
+  every path, in order, when the last has arrived. Cancelling or failing before that pastes
+  nothing, which `zig build test-upload` checks; only after the last file's half-close can a
+  path have been pasted unseen. The pane shows the first file's name and how many more, with
+  one progress for them all.
 - Reads and the writer queue are bounded. The reserved size must match exactly, including
   empty files. Success requires a normal server close after the empty binary half-close.
   Cancelling or losing confirmation after half-close is reported as **unconfirmed**,
@@ -178,13 +184,13 @@ Android client's chosen file-size limits as Rex server limits.
 - `zig build test-clipboard` uses the same isolated server plus a private GTK Broadway display.
   It drives the actual terminal key/paste handlers, covering image bytes, native textures,
   copied files, URI lists, local/remote paths, Ctrl+V attachment handling, text/shell key
-  preservation, pane/host removal, invalid images, write failures, and multiple-file rejection.
+  preservation, pane/host removal, invalid images, write failures, and several files at once.
   It checks exact file contents, private permissions, temporary-image cleanup, and exactly one
   pasted path. Agent metadata is simulated; no Claude Code session or model request is used.
 
 File previews now use the download API; see [file-preview.md](file-preview.md) for behavior,
-limits, and the original Quick Look investigation. Multi-file batches and a general-purpose
-Save Download action are not included. A later
+limits, and the original Quick Look investigation. A general-purpose Save Download action is not
+included. A later
 **Download File…** action could reuse the browser in [`src/ui/goto.zig`](../src/ui/goto.zig),
 then GTK's Save dialog. Its `Server.listDir` wrapper currently discards `status` and
 `truncated`; preserve those for honest error handling. Save downloads to a temporary local

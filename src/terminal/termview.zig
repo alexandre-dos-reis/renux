@@ -62,12 +62,19 @@ fn saveClipboardImage(texture: *gdk.Texture) !*gio.File {
     return file;
 }
 
-fn singleClipboardFile(value: *const gobject.Value) !*gio.File {
-    const files: *gdk.FileList = @ptrCast(@alignCast(value.getBoxed() orelse return error.NoFiles));
-    const head = files.getFiles();
-    // shortcut: one file per upload; use Rex's batching protocol before accepting several.
-    if (head.f_next != null) return error.MultipleFiles;
-    return @ptrCast(@alignCast(head.f_data orelse return error.NoFiles));
+/// The files a copied or dropped list holds, in its order. The list still owns them; the
+/// caller frees the slice.
+fn listedFiles(value: *const gobject.Value) ![]*gio.File {
+    const list: *gdk.FileList = @ptrCast(@alignCast(value.getBoxed() orelse return error.NoFiles));
+    var files: std.ArrayList(*gio.File) = .empty;
+    errdefer files.deinit(gpa);
+    // The chain of links is ours to free; what it links is not.
+    const head: ?*glib.SList = list.getFiles();
+    defer if (head) |h| h.free();
+    var node = head;
+    while (node) |n| : (node = n.f_next) try files.append(gpa, @ptrCast(@alignCast(n.f_data orelse continue)));
+    if (files.items.len == 0) return error.NoFiles;
+    return files.toOwnedSlice(gpa);
 }
 
 test "clipboard handles files and images without treating plain text as an attachment" {
@@ -89,18 +96,22 @@ test "clipboard handles files and images without treating plain text as an attac
     try std.testing.expectEqual(ClipboardKind.files, clipboardKind(mixed));
 }
 
-test "clipboard accepts exactly one file without dropping extra files silently" {
+test "every copied file is taken from the clipboard, in order" {
     var files = [_]*gio.File{ gio.File.newForPath("/tmp/copied 'file'.png"), gio.File.newForPath("/tmp/second.txt") };
     defer for (files) |file| file.as(gobject.Object).unref();
     var value = std.mem.zeroes(gobject.Value);
     _ = value.init(gdk.FileList.getGObjectType());
     defer value.unset();
     value.takeBoxed(gdk.FileList.newFromArray(&files, 1));
-    try std.testing.expectEqual(files[0], try singleClipboardFile(&value));
+    const one = try listedFiles(&value);
+    defer gpa.free(one);
+    try std.testing.expectEqualSlices(*gio.File, files[0..1], one);
     value.takeBoxed(gdk.FileList.newFromArray(&files, 2));
-    try std.testing.expectError(error.MultipleFiles, singleClipboardFile(&value));
+    const two = try listedFiles(&value);
+    defer gpa.free(two);
+    try std.testing.expectEqualSlices(*gio.File, &files, two);
     value.setBoxed(null);
-    try std.testing.expectError(error.NoFiles, singleClipboardFile(&value));
+    try std.testing.expectError(error.NoFiles, listedFiles(&value));
 }
 
 test "clipboard image becomes a private PNG with the same pixels" {
@@ -213,7 +224,7 @@ test "clipboard upload integration" {
     const ctrl_v = std.mem.startsWith(u8, mode, "ctrlv-") or std.mem.eql(u8, mode, "shell-ctrlv");
     try std.testing.expectEqual(@as(c_int, 1), v.handleKey('v', if (ctrl_v) keys.ctrl else keys.ctrl | keys.shift));
     const destroying = std.mem.startsWith(u8, mode, "destroy-");
-    const failed = std.mem.eql(u8, mode, "invalid-image") or std.mem.eql(u8, mode, "save-failure") or std.mem.eql(u8, mode, "multiple-file");
+    const failed = std.mem.eql(u8, mode, "invalid-image") or std.mem.eql(u8, mode, "save-failure");
     if (destroying) {
         overlay.setChild(null);
         if (std.mem.eql(u8, mode, "destroy-host")) {
@@ -860,7 +871,10 @@ pub const TermView = struct {
         w.addController(drag.as(gtk.EventController));
 
         // Local drops insert a path; remote drops send the file before Rex inserts its path.
-        const drop = gtk.DropTarget.new(gio.File.getGObjectType(), .{ .copy = true });
+        // A drop of several files comes as a list; some apps offer only a single file.
+        const drop = gtk.DropTarget.new(gdk.FileList.getGObjectType(), .{ .copy = true });
+        var kinds = [_]usize{ gdk.FileList.getGObjectType(), gio.File.getGObjectType() };
+        drop.setGtypes(&kinds, kinds.len);
         _ = gtk.DropTarget.signals.drop.connect(drop, *TermView, &onDrop, v, .{});
         w.addController(drop.as(gtk.EventController));
 
@@ -1514,29 +1528,41 @@ pub const TermView = struct {
     }
 
     fn onDrop(_: *gtk.DropTarget, value: *const gobject.Value, _: f64, _: f64, v: *TermView) callconv(.c) c_int {
-        const obj = value.getObject() orelse return 0;
-        if (!v.insertFile(@ptrCast(obj), false)) return 0;
+        if (value.f_g_type == gdk.FileList.getGObjectType()) {
+            const files = listedFiles(value) catch return 0;
+            defer gpa.free(files);
+            if (!v.insertFiles(files, false)) return 0;
+        } else {
+            const file: *gio.File = @ptrCast(value.getObject() orelse return 0);
+            if (!v.insertFiles(&.{file}, false)) return 0;
+        }
         _ = v.widget().grabFocus();
         return 1;
     }
 
-    fn insertFile(v: *TermView, file: *gio.File, temporary: bool) bool {
-        if (v.onRemoteHost()) return v.upload(file, temporary);
-        const path = file.getPath() orelse return false;
-        defer glib.free(path);
-        const quoted = glib.shellQuote(path);
-        defer glib.free(quoted);
-        const text = std.fmt.allocPrint(gpa, "{s} ", .{std.mem.span(quoted)}) catch return false;
-        defer gpa.free(text);
-        v.server.paste(v.session_id, v.block_id, text);
+    /// Gives the program the files: on another host by sending them, after which Rex pastes
+    /// where they landed; on this computer by pasting their paths, which it can already read.
+    fn insertFiles(v: *TermView, files: []const *gio.File, temporary: bool) bool {
+        if (v.onRemoteHost()) return v.upload(files, temporary);
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(gpa);
+        for (files) |file| {
+            const path = file.getPath() orelse return false;
+            defer glib.free(path);
+            const quoted = glib.shellQuote(path);
+            defer glib.free(quoted);
+            text.appendSlice(gpa, std.mem.span(quoted)) catch return false;
+            text.append(gpa, ' ') catch return false;
+        }
+        v.server.paste(v.session_id, v.block_id, text.items);
         return true;
     }
 
-    /// Sends a file to the pane's machine, where Rex pastes its path once it has arrived. A
-    /// temporary file is deleted afterwards.
-    pub fn upload(v: *TermView, file: *gio.File, temporary: bool) bool {
+    /// Sends files to the pane's machine, where Rex pastes their paths once all have arrived.
+    /// A temporary file is deleted afterwards.
+    pub fn upload(v: *TermView, files: []const *gio.File, temporary: bool) bool {
         v.upload_shown = 0;
-        return upload_ui.start(v.widget(), v.server, v.session_id, v.block_id, file, temporary, .{ .ctx = v, .changed = uploadChanged });
+        return upload_ui.start(v.widget(), v.server, v.session_id, v.block_id, files, temporary, .{ .ctx = v, .changed = uploadChanged });
     }
 
     /// The file being sent to this pane got further, or is done: its text is drawn again.
@@ -1645,17 +1671,15 @@ pub const TermView = struct {
         defer obj.unref();
         const canvas: *Canvas = @ptrCast(@alignCast(obj));
         const v = canvas.view orelse return;
-        const file = singleClipboardFile(value orelse {
+        const files = listedFiles(value orelse {
             t.server.notifyMessage("Couldn't read the copied file from the clipboard");
             return;
-        }) catch |err| {
-            t.server.notifyMessage(switch (err) {
-                error.MultipleFiles => "Paste one file at a time",
-                else => "The clipboard doesn't contain a file",
-            });
+        }) catch {
+            t.server.notifyMessage("The clipboard doesn't contain a file");
             return;
         };
-        _ = v.insertFile(file, false);
+        defer gpa.free(files);
+        _ = v.insertFiles(files, false);
     }
 
     fn pastedImage(source: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
@@ -1707,7 +1731,7 @@ pub const TermView = struct {
             return;
         };
         // Local paths must remain readable after paste; remote uploads remove their source.
-        inserted = v.insertFile(image, true);
+        inserted = v.insertFiles(&.{image}, true);
     }
 
     const PendingPaste = struct { server: *Server, session_id: []u8, block_id: []u8, text: []u8 };
@@ -2823,7 +2847,10 @@ fn drawUploadGhost(v: *TermView, sn: *gtk.Snapshot, f: *const term_mod.Frame, f_
     var status_buf: [8]u8 = undefined;
     const status: []const u8 = if (up.finishing) "" else if (up.percent) |pc| std.fmt.bufPrint(&status_buf, "{d}%", .{pc}) catch "" else "";
     var name_buf: [300]u8 = undefined;
-    const label = std.fmt.bufPrint(&name_buf, "…/{s}", .{up.name()}) catch "…/file";
+    // Several files show as the first and how many more: their paths land one after another.
+    var more: [16]u8 = undefined;
+    const and_more = if (up.others() == 0) "" else std.fmt.bufPrint(&more, " +{d}", .{up.others()}) catch "";
+    const label = std.fmt.bufPrint(&name_buf, "…/{s}{s}", .{ up.name(), and_more }) catch "…/file";
     // Cells after the name: a gap and the percentage, then a gap and the cancel button. Once
     // everything is sent there is no button: a cancel could no longer tell whether the file
     // arrived.

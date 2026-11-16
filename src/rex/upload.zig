@@ -1,5 +1,6 @@
-//! One dropped file, sent on its own revision-11 control and byte-stream connections. The
-//! terminal connection stays at its existing revision. All callbacks run on the main loop;
+//! Dropped or pasted files, sent on their own revision-11 control connection and one byte
+//! stream each. Several go as one batch, whose paths Rex pastes together once it has them all.
+//! The terminal connection stays at its existing revision. All callbacks run on the main loop;
 //! file reads are asynchronous and the socket's writer queue is kept small.
 const std = @import("std");
 const gio = @import("gio");
@@ -35,40 +36,71 @@ pub const Upload = struct {
     server: *Server,
     session_id: []u8,
     block_id: []u8,
+    /// The files, in the order their paths are pasted, and which one is being sent.
+    files: []*gio.File,
+    sizes: []u64,
+    index: usize = 0,
+    /// The first file's name, for whoever shows the upload.
     name: []u8,
+    /// What groups several files, so that Rex pastes their paths together once all of them
+    /// have arrived. One file on its own has no need of it.
+    batch: [36]u8 = undefined,
     listener: Listener,
     cancellable: *gio.Cancellable,
     input: ?*gio.FileInputStream = null,
     ctl: ?*control.Control = null,
     socket: ?*ws.Socket = null,
     refs: usize = 1,
-    phase: enum { preparing, sending, finishing, done } = .preparing,
+    /// `closing` is a file that isn't the last, all sent, waiting for Rex to take it;
+    /// `finishing` is the last one, after which Rex pastes the paths.
+    phase: enum { preparing, sending, closing, finishing, done } = .preparing,
+    /// The file being sent: its size, how much of it has gone, and whether Rex has said its
+    /// data connection is ready.
     size: u64 = 0,
     sent: u64 = 0,
+    ready: bool = false,
+    /// All the files' sizes together, and how much the files before this one came to.
+    total: u64 = 0,
+    before: u64 = 0,
     deadline: c_uint = 0,
     pump: c_uint = 0,
 
-    /// The returned handle lives until `finished`; outstanding file reads hold their own refs.
-    pub fn start(server: *Server, session_id: []const u8, block_id: []const u8, file: *gio.File, listener: Listener) !*Upload {
+    /// Sends `files` to the machine a pane is on; Rex pastes their paths there, in this order,
+    /// when all have arrived. The returned handle lives until `finished`; outstanding file
+    /// reads hold their own refs.
+    pub fn start(server: *Server, session_id: []const u8, block_id: []const u8, files: []const *gio.File, listener: Listener) !*Upload {
         if (server.state != .online) return error.ServerOffline;
+        if (files.len == 0) return error.NoFiles;
         for (active.items) |u| if (u.server == server and std.mem.eql(u8, u.block_id, block_id)) return error.AlreadyUploading;
-        const base = file.getBasename() orelse return error.InvalidName;
-        defer glib.free(base);
-        const name = std.mem.span(base);
-        if (name.len == 0 or !std.unicode.utf8ValidateSlice(name)) return error.InvalidName;
+        for (files) |file| {
+            const base = file.getBasename() orelse return error.InvalidName;
+            defer glib.free(base);
+            const name = std.mem.span(base);
+            if (name.len == 0 or !std.unicode.utf8ValidateSlice(name)) return error.InvalidName;
+        }
+        const first = files[0].getBasename().?;
+        defer glib.free(first);
         const u = try gpa.create(Upload);
         errdefer gpa.destroy(u);
         const sid = try gpa.dupe(u8, session_id);
         errdefer gpa.free(sid);
         const bid = try gpa.dupe(u8, block_id);
         errdefer gpa.free(bid);
-        const own_name = try gpa.dupe(u8, name);
+        const own_name = try gpa.dupe(u8, std.mem.span(first));
         errdefer gpa.free(own_name);
+        const own_files = try gpa.dupe(*gio.File, files);
+        errdefer gpa.free(own_files);
+        const sizes = try gpa.alloc(u64, files.len);
+        errdefer gpa.free(sizes);
+        @memset(sizes, 0);
         try active.append(gpa, u);
-        u.* = .{ .server = server, .session_id = sid, .block_id = bid, .name = own_name, .listener = listener, .cancellable = gio.Cancellable.new() };
+        for (own_files) |file| _ = file.ref();
+        u.* = .{ .server = server, .session_id = sid, .block_id = bid, .files = own_files, .sizes = sizes, .name = own_name, .listener = listener, .cancellable = gio.Cancellable.new() };
+        const id = glib.uuidStringRandom();
+        defer glib.free(id);
+        @memcpy(&u.batch, std.mem.span(id)[0..36]);
         u.deadline = glib.timeoutAdd(30_000, &timedOut, u);
-        u.ref();
-        file.queryInfoAsync("standard::type", .{}, glib.PRIORITY_DEFAULT, u.cancellable, &checkedFile, u);
+        u.measure();
         return u;
     }
 
@@ -85,6 +117,9 @@ pub const Upload = struct {
         if (u.refs != 0) return;
         if (u.input) |input| input.unref();
         u.cancellable.as(gobject.Object).unref();
+        for (u.files) |file| file.unref();
+        gpa.free(u.files);
+        gpa.free(u.sizes);
         gpa.free(u.session_id);
         gpa.free(u.block_id);
         gpa.free(u.name);
@@ -93,6 +128,8 @@ pub const Upload = struct {
 
     fn finish(u: *Upload, outcome: Outcome, message: []const u8) void {
         if (u.phase == .done) return;
+        // Only the last file's arrival makes Rex paste, so only then can a path have been
+        // pasted without our hearing of it.
         const uncertain = u.phase == .finishing and outcome != .sent;
         u.phase = .done;
         if (std.mem.indexOfScalar(*Upload, active.items, u)) |i| _ = active.swapRemove(i);
@@ -115,7 +152,19 @@ pub const Upload = struct {
         return 0;
     }
 
-    fn checkedFile(source: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
+    fn wait(u: *Upload, ms: c_uint) void {
+        if (u.deadline != 0) _ = glib.Source.remove(u.deadline);
+        u.deadline = if (ms == 0) 0 else glib.timeoutAdd(ms, &timedOut, u);
+    }
+
+    /// Looks at each file before anything is sent: all must be regular files, and their
+    /// sizes say how far along the whole upload is.
+    fn measure(u: *Upload) void {
+        u.ref();
+        u.files[u.index].queryInfoAsync("standard::type,standard::size", .{}, glib.PRIORITY_DEFAULT, u.cancellable, &measured, u);
+    }
+
+    fn measured(source: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
         const u: *Upload = @ptrCast(@alignCast(data.?));
         defer u.unref();
         var err: ?*glib.Error = null;
@@ -127,8 +176,17 @@ pub const Upload = struct {
         const i = info orelse return u.finish(.failed, "Couldn't inspect the dropped file");
         // Reject pipes and devices before an open could wait indefinitely for a writer.
         if (i.getFileType() != .regular) return u.finish(.failed, "Drop a regular file; folders and special files aren't supported");
+        u.sizes[u.index] = @intCast(@max(0, i.getSize()));
+        u.total += u.sizes[u.index];
+        u.index += 1;
+        if (u.index < u.files.len) return u.measure();
+        u.index = 0;
+        u.open();
+    }
+
+    fn open(u: *Upload) void {
         u.ref();
-        file.readAsync(glib.PRIORITY_DEFAULT, u.cancellable, &openedFile, u);
+        u.files[u.index].readAsync(glib.PRIORITY_DEFAULT, u.cancellable, &openedFile, u);
     }
 
     fn openedFile(source: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
@@ -142,6 +200,7 @@ pub const Upload = struct {
             if (input) |in| in.unref();
             return;
         }
+        if (u.input) |old| old.unref();
         u.input = input orelse return u.finish(.failed, "Couldn't open the dropped file");
         u.ref();
         u.input.?.queryInfoAsync("standard::type,standard::size", glib.PRIORITY_DEFAULT, u.cancellable, &fileInfo, u);
@@ -158,7 +217,13 @@ pub const Upload = struct {
         if (u.phase == .done) return;
         const i = info orelse return u.finish(.failed, "Couldn't read the dropped file's size");
         if (i.getFileType() != .regular or i.getSize() < 0) return u.finish(.failed, "Drop a regular file; folder uploads aren't supported");
+        // The size of the file as opened is the one promised to Rex; it may have changed
+        // since it was looked at.
         u.size = @intCast(i.getSize());
+        u.total = u.total - u.sizes[u.index] + u.size;
+        u.sizes[u.index] = u.size;
+        u.sent = 0;
+        if (u.ctl != null) return u.reserve();
         u.ctl = control.Control.open(u.server.url, "Renux file upload", @import("server.zig").version, null, revision, .{
             .ctx = u,
             .on_welcome = welcomed,
@@ -186,11 +251,26 @@ pub const Upload = struct {
             .err => |e| return u.finish(.failed, e.message),
             .ok => {},
         }
+        u.reserve();
+    }
+
+    /// Asks Rex for room for the file being sent. Several files name their batch, their
+    /// place in it and how many there are, and Rex holds their paths back until it has all.
+    fn reserve(u: *Upload) void {
+        const base = u.files[u.index].getBasename() orelse return u.finish(.failed, "That file's name isn't valid");
+        defer glib.free(base);
+        const name = std.mem.span(base);
         const id = glib.uuidStringRandom();
         defer glib.free(id);
         var buf: [48]u8 = undefined;
         const ref_id = std.fmt.bufPrint(&buf, "upload:{s}", .{std.mem.span(id)}) catch unreachable;
-        u.ctl.?.call("com.superlogical.terminal.upload_begin", .{ .session_id = u.session_id, .block_id = u.block_id, .args = .{ .ref = ref_id, .name = u.name, .size = u.size } }, control.Callback.of(Upload, u, reserved));
+        const done = control.Callback.of(Upload, u, reserved);
+        const method = "com.superlogical.terminal.upload_begin";
+        if (u.files.len == 1) {
+            u.ctl.?.call(method, .{ .session_id = u.session_id, .block_id = u.block_id, .args = .{ .ref = ref_id, .name = name, .size = u.size } }, done);
+        } else {
+            u.ctl.?.call(method, .{ .session_id = u.session_id, .block_id = u.block_id, .args = .{ .ref = ref_id, .name = name, .size = u.size, .batch = @as([]const u8, &u.batch), .index = u.index, .count = u.files.len } }, done);
+        }
     }
 
     fn reserved(u: *Upload, result: control.Result) void {
@@ -201,6 +281,7 @@ pub const Upload = struct {
         };
         const ticket = json.str(payload, "ticket") orelse return u.finish(.failed, "Rex returned no upload ticket");
         const hello = @import("stream.zig").helloFor(ticket) orelse return u.finish(.failed, "Rex returned an invalid upload ticket");
+        u.ready = false;
         u.socket = ws.Socket.open(.{ .url = u.server.url, .path = "/api/data", .protocol = protocol, .first_message = &hello }, .{
             .ctx = u,
             .on_open = dataOpened,
@@ -215,12 +296,12 @@ pub const Upload = struct {
         const u: *Upload = @ptrCast(@alignCast(ctx));
         u.ref();
         defer u.unref();
-        if (u.phase != .preparing) return;
+        if (u.ready or u.phase == .done) return;
         if (!binary or data.len != 32 or data[0] != 0x81) return u.finish(.failed, "Rex refused the file's data connection");
-        if (u.deadline != 0) _ = glib.Source.remove(u.deadline);
-        u.deadline = 0;
+        u.ready = true;
+        u.wait(0);
         u.phase = .sending;
-        u.listener.progress(u.listener.ctx, 0, u.size);
+        u.listener.progress(u.listener.ctx, u.before, u.total);
         u.readNext();
     }
 
@@ -255,16 +336,20 @@ pub const Upload = struct {
         if (!fits(u.sent, u.size, n)) return u.finish(.failed, "The file changed size while sending; nothing was pasted");
         if (n == 0) {
             if (!u.socket.?.sendBinary("")) return u.finish(.failed, "Couldn't finish sending the file");
-            // Once the half-close is queued, a disconnect may mean the path was already pasted.
+            u.wait(60_000);
+            if (u.index + 1 < u.files.len) {
+                u.phase = .closing;
+                return;
+            }
+            // Once the last half-close is queued, a disconnect may mean the paths were pasted.
             u.phase = .finishing;
-            u.deadline = glib.timeoutAdd(60_000, &timedOut, u);
-            u.listener.progress(u.listener.ctx, u.size, u.size);
+            u.listener.progress(u.listener.ctx, u.total, u.total);
             return;
         }
         const raw = b.getData(null).?;
         if (!u.socket.?.sendBinary(raw[0..n])) return u.finish(.failed, "The upload connection stopped accepting data");
         u.sent += n;
-        u.listener.progress(u.listener.ctx, u.sent, u.size);
+        u.listener.progress(u.listener.ctx, u.before + u.sent, u.total);
         u.readNext();
     }
 
@@ -272,7 +357,13 @@ pub const Upload = struct {
         const u: *Upload = @ptrCast(@alignCast(ctx));
         u.socket = null;
         if (u.phase == .finishing and code == 1000) return u.finish(.sent, "File sent; Rex pasted its path into the pane");
-        u.finish(.failed, "The file upload connection closed before completion");
+        if (u.phase != .closing or code != 1000) return u.finish(.failed, "The file upload connection closed before completion");
+        // Rex has this file. The next one goes the same way, over the same control connection.
+        u.before += u.size;
+        u.index += 1;
+        u.phase = .sending;
+        u.wait(30_000);
+        u.open();
     }
 };
 
@@ -326,6 +417,8 @@ test "upload integration" {
             }
             if (std.mem.eql(u8, p.mode, "cancel-sending") and sent > 0 and p.transfer.phase == .sending) p.transfer.cancel();
             if (std.mem.eql(u8, p.mode, "cancel-finishing") and p.transfer.phase == .finishing) p.transfer.cancel();
+            // The first file of two has gone and the second is on its way.
+            if (std.mem.eql(u8, p.mode, "batch-cancel") and p.transfer.index == 1 and p.transfer.sent > 0) p.transfer.cancel();
         }
         fn finished(ctx: *anyopaque, outcome: Outcome, message: []const u8) void {
             const p: *@This() = @ptrCast(@alignCast(ctx));
@@ -347,11 +440,15 @@ test "upload integration" {
     const file = gio.File.newForPath(path);
     defer file.unref();
     const listener: Listener = .{ .ctx = &p, .progress = Probe.progress, .finished = Probe.finished };
-    const u = try Upload.start(&server, sid, bid, file, listener);
+    const second = if (std.c.getenv("RENUX_UPLOAD_TEST_FILE2")) |other| gio.File.newForPath(other) else null;
+    defer if (second) |f| f.unref();
+    const batch = std.mem.startsWith(u8, mode, "batch");
+    const sending: []const *gio.File = if (batch) &.{ file, second orelse return error.MissingSecondFile } else &.{file};
+    const u = try Upload.start(&server, sid, bid, sending, listener);
     p.transfer = u;
     u.ref();
     defer u.unref();
-    if (std.mem.eql(u8, mode, "duplicate")) try std.testing.expectError(error.AlreadyUploading, Upload.start(&server, sid, bid, file, listener));
+    if (std.mem.eql(u8, mode, "duplicate")) try std.testing.expectError(error.AlreadyUploading, Upload.start(&server, sid, bid, &.{file}, listener));
     if (std.mem.eql(u8, mode, "cancel-preparing")) u.cancel();
     if (std.mem.eql(u8, mode, "host-removed")) cancelForServer(&server);
     if (std.mem.eql(u8, mode, "old-server")) Upload.welcomed(u, undefined, .{ .api_revision = 10, .client_id = "", .reconnect_token = null, .resumed = false });
@@ -369,7 +466,7 @@ test "upload integration" {
     }
     try std.testing.expectEqual(@as(usize, 1), u.refs);
     try std.testing.expect(!p.timed_out);
-    const expected: Outcome = if (std.mem.eql(u8, mode, "cancel-finishing")) .unconfirmed else if (std.mem.startsWith(u8, mode, "cancel-") or std.mem.eql(u8, mode, "host-removed")) .cancelled else if (std.mem.eql(u8, mode, "missing") or std.mem.eql(u8, mode, "directory") or std.mem.eql(u8, mode, "fifo") or std.mem.eql(u8, mode, "old-server") or std.mem.eql(u8, mode, "grow") or std.mem.eql(u8, mode, "shrink")) .failed else .sent;
+    const expected: Outcome = if (std.mem.eql(u8, mode, "cancel-finishing")) .unconfirmed else if (std.mem.startsWith(u8, mode, "cancel-") or std.mem.eql(u8, mode, "host-removed") or std.mem.eql(u8, mode, "batch-cancel")) .cancelled else if (std.mem.eql(u8, mode, "missing") or std.mem.eql(u8, mode, "directory") or std.mem.eql(u8, mode, "fifo") or std.mem.eql(u8, mode, "old-server") or std.mem.eql(u8, mode, "grow") or std.mem.eql(u8, mode, "shrink")) .failed else .sent;
     if (p.outcome != expected) std.debug.print("upload outcome {any}, expected {s}: {s}\n", .{ p.outcome, @tagName(expected), p.message[0..p.message_len] });
     try std.testing.expectEqual(expected, p.outcome.?);
     try std.testing.expectEqual(@as(usize, 0), active.items.len);

@@ -24,10 +24,11 @@ and please report them as [issues](https://github.com/zenodea/renux/issues).
   own background, so the panes fill the window.
 - **Your agents at a glance.** Panes running coding agents show what they are doing, and the
   agent board sorts them into Idle, Running, Attention and Done.
-- **Files for remote panes.** Drop a file, or paste a copied file or clipboard image with
-  Ctrl+Shift+V. Coding-agent panes also accept attachments with Ctrl+V. Rex uploads it and
-  inserts its remote path. The file's name shows at the cursor and fills in as it goes. Local panes insert a local path.
-  Screenshots become PNG files. One file at a time.
+- **Files for remote panes.** Drop files, or paste copied files or a clipboard image with
+  Ctrl+Shift+V. Coding-agent panes also accept attachments with Ctrl+V. Rex uploads them and
+  inserts their remote paths, in order, once all have arrived. The first file's name shows at
+  the cursor and fills in as they go. Local panes insert local paths. Screenshots become PNG
+  files. Each file can be up to 100 MB.
 - **Peek at files.** Ctrl+click a file path to see the file by it, locally or remotely: the
   lines around the one named, in syntax colors, or the picture. Enter opens the file in your
   editor in a new pane to the right (`nvim` by default; the Editor command setting changes

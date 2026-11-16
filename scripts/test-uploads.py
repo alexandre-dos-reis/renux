@@ -106,6 +106,8 @@ def main():
                 link.symlink_to(regular)
                 empty = root / "empty.bin"
                 empty.touch()
+                second = root / "second file.bin"
+                second.write_bytes(b"second\n" * 5000)
                 fifo = root / "pipe"
                 os.mkfifo(fifo)
                 cases = [
@@ -114,6 +116,7 @@ def main():
                     ("cancel-finishing", regular), ("host-removed", regular),
                     ("missing", root / "missing"), ("directory", root), ("fifo", fifo),
                     ("old-server", regular), ("grow", regular), ("shrink", regular),
+                    ("batch", regular), ("batch-cancel", regular),
                 ]
                 if graphical:
                     def chunk(kind, payload):
@@ -142,7 +145,7 @@ def main():
                 for mode, source in cases:
                     regular.write_bytes(data)
                     record.write_bytes(b"")
-                    test_env = dict(env, RENUX_UPLOAD_TEST_FILE=str(source))
+                    test_env = dict(env, RENUX_UPLOAD_TEST_FILE=str(source), RENUX_UPLOAD_TEST_FILE2=str(second))
                     expected = source
                     if args.preview:
                         test_env.update(RENUX_PREVIEW_TEST_MODE=mode, RENUX_PREVIEW_TEST_EXPECTED=str(source),
@@ -172,17 +175,20 @@ def main():
                         print(f"PASS {mode}: text/terminal shortcut preserved", flush=True)
                         continue
                     paths = shlex.split(pasted)
-                    assert len(paths) <= 1, (mode, "Path was pasted more than once", pasted)
-                    no_paste = mode.startswith("destroy-") or mode in ("invalid-image", "save-failure", "multiple-file")
-                    success = not no_paste if args.clipboard else mode in ("success", "empty", "symlink", "duplicate")
+                    # Several files go as one batch: every path is pasted once, in the order given.
+                    several = [source, second] if mode == "batch" else [source, source] if mode == "multiple-file" else None
+                    assert len(paths) <= (len(several) if several else 1), (mode, "Path was pasted more than once", pasted)
+                    no_paste = mode.startswith("destroy-") or mode in ("invalid-image", "save-failure")
+                    success = not no_paste if args.clipboard else mode in ("success", "empty", "symlink", "duplicate", "batch")
                     if success:
-                        assert len(paths) == 1, (mode, "No path was pasted", pasted)
+                        assert len(paths) == (len(several) if several else 1), (mode, "Not every path was pasted", pasted)
                     elif mode != "cancel-finishing":
                         assert not paths, (mode, "Cancelled/failed paste produced a path", pasted)
-                    for path in paths:
+                    for position, path in enumerate(paths):
                         uploaded = Path(path)
                         assert uploaded.is_relative_to(root), ("Paste escaped the disposable directory", path)
-                        assert uploaded.read_bytes() == expected.read_bytes(), (mode, "Pasted file bytes differ")
+                        wanted = several[position] if several else expected
+                        assert uploaded.read_bytes() == wanted.read_bytes(), (mode, "Pasted file bytes differ")
                         if mode == "local-image":
                             assert uploaded.stat().st_mode & 0o777 == 0o600, "Clipboard image is not private"
                             uploaded.unlink()  # This test has finished reading its retained local image.

@@ -14,7 +14,9 @@ var shown: std.ArrayList(*Progress) = .empty;
 /// The pane showing an upload, told to draw again as the upload moves on.
 pub const Watcher = struct { ctx: *anyopaque, changed: *const fn (ctx: *anyopaque) void };
 
-pub fn start(widget: *gtk.Widget, server: *Server, session_id: []const u8, block_id: []const u8, file: *gio.File, temporary: bool, watcher: Watcher) bool {
+/// Sends `files` to a pane's machine. `temporary` is for a single file made for the occasion,
+/// such as a pasted picture, which is deleted afterwards.
+pub fn start(widget: *gtk.Widget, server: *Server, session_id: []const u8, block_id: []const u8, files: []const *gio.File, temporary: bool, watcher: Watcher) bool {
     const ancestor = widget.getAncestor(adw.ToastOverlay.getGObjectType()) orelse {
         server.notifyMessage("Couldn't show file upload progress");
         return false;
@@ -28,19 +30,19 @@ pub fn start(widget: *gtk.Widget, server: *Server, session_id: []const u8, block
         return false;
     };
     p.* = .{ .overlay = @ptrCast(ancestor), .watcher = watcher };
-    p.transfer = upload.Upload.start(server, session_id, block_id, file, .{ .ctx = p, .progress = Progress.changed, .finished = Progress.finished }) catch |err| {
+    p.transfer = upload.Upload.start(server, session_id, block_id, files, .{ .ctx = p, .progress = Progress.changed, .finished = Progress.finished }) catch |err| {
         gpa.destroy(p);
         server.notifyMessage(switch (err) {
             error.ServerOffline => "Connect to this host before sending a file",
-            error.AlreadyUploading => "A file is already being sent to this pane",
+            error.AlreadyUploading => "Files are already being sent to this pane",
             error.InvalidName => "That file's name isn't valid UTF-8",
             else => "Couldn't start the file upload",
         });
         return false;
     };
-    if (temporary) {
-        _ = file.ref();
-        p.source = file;
+    if (temporary and files.len == 1) {
+        _ = files[0].ref();
+        p.source = files[0];
     }
     _ = p.overlay.as(gobject.Object).ref();
     shown.appendAssumeCapacity(p);
@@ -78,6 +80,11 @@ pub const Progress = struct {
         return p.transfer.name;
     }
 
+    /// How many more files are being sent along with the one named.
+    pub fn others(p: *const Progress) usize {
+        return p.transfer.files.len - 1;
+    }
+
     pub fn cancel(p: *Progress) void {
         p.transfer.cancel();
     }
@@ -108,7 +115,9 @@ pub const Progress = struct {
         // arrival whose pane is no longer there to show it.
         if (outcome != .sent or p.watcher == null) {
             var buf: [900]u8 = undefined;
-            const text = std.fmt.bufPrintSentinel(&buf, "{s}: {s}", .{ p.transfer.name, message }, 0) catch "File upload finished";
+            var more: [32]u8 = undefined;
+            const and_more = if (p.others() == 0) "" else std.fmt.bufPrint(&more, " and {d} more", .{p.others()}) catch "";
+            const text = std.fmt.bufPrintSentinel(&buf, "{s}{s}: {s}", .{ p.transfer.name, and_more, message }, 0) catch "File upload finished";
             const toast = adw.Toast.new(text.ptr);
             toast.setUseMarkup(0);
             toast.setTimeout(8);
