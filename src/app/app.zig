@@ -429,6 +429,7 @@ pub const App = struct {
     look_css: ?*gtk.CssProvider = null,
     last_dark: bool = true,
     badge_count: u32 = 0,
+    awake: @import("awake.zig").Inhibitor = .{},
     /// The session bus the launcher badge is sent on, once it has answered.
     badge_bus: ?*gio.DBusConnection = null,
     badge_bus_asked: bool = false,
@@ -455,6 +456,16 @@ pub const App = struct {
         return a.app.as(gio.Application).run(0, null);
     }
 
+    fn closingWindow(_: *gtk.Window, a: *App) callconv(.c) c_int {
+        // GTK drops its inhibitor backend during shutdown, before that signal reaches us.
+        a.awake.release(a.app.as(gtk.Application));
+        return 0;
+    }
+
+    pub fn awakeChanged(a: *App) void {
+        a.awake.sync(a);
+    }
+
     fn activate(_: *adw.Application, a: *App) callconv(.c) void {
         // GTK may have reset it while starting up.
         if (builtin.os.tag == .macos and std.c.getenv("RENUX_NOFOCUS") != null) @import("../platform/macos.zig").neverActivate();
@@ -479,6 +490,7 @@ pub const App = struct {
         useAppIcon();
         a.window = adw.ApplicationWindow.new(a.app.as(gtk.Application));
         const win = a.window.as(gtk.Window);
+        _ = gtk.Window.signals.close_request.connect(win, *App, &closingWindow, a, .{});
         win.setDefaultSize(1180, 760);
         // Development: RENUX_SIZE=WIDTHxHEIGHT starts the window at another size, and keeps it
         // there even on a smaller screen, for screenshots.
@@ -907,6 +919,7 @@ pub const App = struct {
             a.tabsChanged();
             a.headersChanged();
             a.viewsChanged();
+            a.awakeChanged();
             a.applyLook();
             a.setTight(settings.current.tight);
             a.redrawAll();
@@ -1410,6 +1423,7 @@ pub const App = struct {
         gpa.free(h.label);
         gpa.free(h.page);
         gpa.destroy(h);
+        a.awakeChanged();
         a.rebuildSidebar();
     }
 
@@ -1483,6 +1497,8 @@ pub const App = struct {
         const h: *Host = @ptrCast(@alignCast(ctx));
         const a = h.app;
         const here = a.current == h;
+        // Runs even for background hosts and a closed block's final notification.
+        if (what == .block or what == .view or what == .sessions or what == .state) a.awakeChanged();
         switch (what) {
             .state => {
                 if (here) {

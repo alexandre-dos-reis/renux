@@ -500,7 +500,8 @@ fn serverPage(ctx: *Ctx) *gtk.Widget {
     info.add(label.as(gtk.Widget));
     switchRow(ctx, info, "Remote Control", "Let Rex and other clients perform actions in this app", &settings.current.remote_control, null);
 
-    @import("../app/manage.zig").agentsGroup(p, a);
+    const agents = @import("../app/manage.zig").agentsGroup(p, a);
+    switchRow(ctx, agents, "Keep this computer awake while an agent is working", "Prevents suspend and idle sleep while any pane reports working", &settings.current.keep_awake_while_working, App.awakeChanged);
     const more = group(p, "Help");
     inline for (.{ .{ "Diagnostics", "What Renux knows about each host, to copy into a bug report", "client.diagnostics" }, .{ "Welcome pages", "The short tour from the first launch", "client.onboarding" } }) |e| {
         const row = adw.ActionRow.new();

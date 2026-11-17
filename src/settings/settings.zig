@@ -116,6 +116,8 @@ pub const Settings = struct {
     /// The agent board lists each column's cards under their sessions' names.
     board_by_session: bool = false,
     agent_board: bool = false,
+    /// Ask the desktop to prevent suspend and idle sleep while a pane reports working.
+    keep_awake_while_working: bool = false,
     overview: bool = false,
     program_scroll_glide: bool = false,
     /// Link schemes, such as vscode, that open their app without asking.
@@ -779,8 +781,10 @@ test "every setting comes back as it was saved" {
     try std.testing.expectEqualStrings("Monospace 11", current.font);
     try std.testing.expectEqualStrings("Solarized Light", current.theme_light);
     try std.testing.expect(current.show_headers and !current.tight);
+    try std.testing.expect(!current.keep_awake_while_working);
     setString(&current.font, "Iosevka 13");
     current.tight = true;
+    current.keep_awake_while_working = true;
     current.pad_x = 12;
     current.cursor_style = .bar;
     current.highlight_color = 0x4fe3c1;
@@ -792,6 +796,7 @@ test "every setting comes back as it was saved" {
     load();
     try std.testing.expectEqualStrings("Iosevka 13", current.font);
     try std.testing.expect(current.tight);
+    try std.testing.expect(current.keep_awake_while_working);
     try std.testing.expectEqual(@as(f64, 12), current.pad_x);
     try std.testing.expectEqual(CursorStyle.bar, current.cursor_style);
     try std.testing.expectEqual(@as(u32, 0x4fe3c1), current.highlight_color);
@@ -806,6 +811,7 @@ test "every setting comes back as it was saved" {
     try std.testing.expect(std.mem.indexOf(u8, text, "padding-x=12") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "recent-paths=false") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "cursor-style=bar") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "keep-awake-while-working=true") != null);
 }
 
 test "a save keeps what another window wrote, unknown keys and comments" {

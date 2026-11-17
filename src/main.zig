@@ -90,6 +90,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test {
+    _ = @import("app/awake.zig");
     _ = @import("rex/ws.zig");
     _ = @import("terminal/term.zig");
     _ = @import("rex/control.zig");

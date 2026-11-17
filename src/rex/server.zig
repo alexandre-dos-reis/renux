@@ -496,6 +496,7 @@ pub const Server = struct {
                 gpa.free(e.key);
             }
             s.releaseTerminal(id);
+            s.notify(.block, id);
         } else if (eql(kind, "block_event")) {
             s.handleBlockEvent(session_id, payload orelse return);
         }

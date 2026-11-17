@@ -23,7 +23,10 @@ and please report them as [issues](https://github.com/zenodea/renux/issues).
 - **Only the terminals.** Full screen mode hides the sidebar, the title rows and the window's
   own background, so the panes fill the window.
 - **Your agents at a glance.** Panes running coding agents show what they are doing, and the
-  agent board sorts them into Idle, Running, Attention and Done.
+  agent board sorts them into Idle, Running, Attention and Done. In Settings > Server > Agents,
+  **Keep this computer awake while an agent is working** asks your desktop to prevent suspend
+  and idle sleep while any connected pane reports working. It is off by default and releases
+  when work stops, the switch goes off, or Renux closes. Your desktop has the final say.
 - **Files for remote panes.** Drop files, or paste copied files or a clipboard image with
   Ctrl+Shift+V. Coding-agent panes also accept attachments with Ctrl+V. Rex uploads them and
   inserts their remote paths, in order, once all have arrived. The first file's name shows at
