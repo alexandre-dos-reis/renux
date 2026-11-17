@@ -88,7 +88,7 @@ pub fn show(parent: *gtk.Widget, server: *Server, sid: []const u8, bid: ?[]const
     p.dialog.present(parent);
     _ = p.entry.as(gtk.Widget).grabFocus();
     // Discovery needs API 15; the pane's existing connection stays at its own revision.
-    if (p.bid != null) p.ctl = control.Control.open(server.url, "Renux port discovery", @import("../rex/server.zig").version, null, 15, .{
+    if (p.bid != null) p.ctl = control.Control.open(server.connectionUrl(), "Renux port discovery", @import("../rex/server.zig").version, null, 15, .{
         .ctx = p,
         .on_welcome = Ports.welcome,
         .on_event = Ports.event,
