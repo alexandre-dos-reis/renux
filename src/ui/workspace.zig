@@ -776,12 +776,12 @@ pub const Workspace = struct {
         // a little, so the chips there don't jump back and forth near a corner.
         const mid = [2]f64{ m.cur[0] + m.size[0] / 2, m.cur[1] + m.size[1] / 2 };
         var far = [4]f64{ h - mid[1], mid[1], mid[0], w - mid[0] };
-        far[@intFromEnum(d.edge)] -= 12;
+        far[@backingInt(d.edge)] -= 12;
         var best: usize = 0;
         for (far, 0..) |f, k| if (f < far[best]) {
             best = k;
         };
-        d.edge = @enumFromInt(best);
+        d.edge = @fromBackingInt(@intCast(best));
         ws.root.queueAllocate();
     }
 
