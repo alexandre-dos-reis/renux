@@ -59,9 +59,9 @@ There are no packages yet, so Renux is built from source. You need a Rex server 
 
    | Distribution | Command |
    |---|---|
-   | Fedora | `sudo dnf install gtk4-devel libadwaita-devel librsvg2-devel` |
-   | Debian, Ubuntu | `sudo apt install libgtk-4-dev libadwaita-1-dev librsvg2-dev` |
-   | Arch Linux | `sudo pacman -S gtk4 libadwaita librsvg` |
+   | Fedora | `sudo dnf install gtk4-devel libadwaita-devel librsvg2-devel poppler-glib-devel` |
+   | Debian, Ubuntu | `sudo apt install libgtk-4-dev libadwaita-1-dev librsvg2-dev libpoppler-glib-dev` |
+   | Arch Linux | `sudo pacman -S gtk4 libadwaita librsvg poppler-glib` |
 
 2. Build and install into `~/.local`, which puts the program, its desktop entry and its icon
    where your desktop looks for them:
@@ -101,7 +101,7 @@ Settings > Remote Hosts > Use this computer's keys on remote hosts.
 
 ## Building
 
-You need Zig 0.17, GTK 4, libadwaita and librsvg, with their development files.
+You need Zig 0.17, GTK 4, libadwaita, librsvg and poppler-glib, with their development files.
 
 ```sh
 git submodule update --init
