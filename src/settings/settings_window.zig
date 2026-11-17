@@ -1263,7 +1263,7 @@ fn hostsPage(ctx: *Ctx) *gtk.Widget {
     if (settings.current.hosts.items.len == 0) {
         const row = adw.ActionRow.new();
         row.as(adw.PreferencesRow).setTitle("No saved hosts");
-        row.setSubtitle("Add a Rex HTTP or HTTPS address to use its sessions here");
+        row.setSubtitle("Add a Rex HTTP, HTTPS or SSH address to use its sessions here");
         g.add(row.as(gtk.Widget));
     }
     const buttons = gtk.Box.new(.horizontal, 8);

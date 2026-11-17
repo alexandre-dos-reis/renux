@@ -547,6 +547,12 @@ fn migrateOldServer() void {
 pub fn labelFor(url: []const u8) []const u8 {
     // A socket is only ever this computer's own server.
     if (std.mem.startsWith(u8, url, "unix://")) return "This Computer";
+    if (@import("../rex/ssh.zig").isSsh(url)) {
+        const address = @import("../rex/ssh.zig").parse(url) catch return "SSH host";
+        const host = address.host;
+        if (std.mem.indexOfScalar(u8, host, ':') != null or std.ascii.isDigit(host[0])) return host;
+        return host[0 .. std.mem.indexOfScalar(u8, host, '.') orelse host.len];
+    }
     var rest = if (std.mem.indexOf(u8, url, "://")) |i| url[i + 3 ..] else url;
     rest = rest[0 .. std.mem.indexOfAny(u8, rest, ":/") orelse rest.len];
     // A numeric address says nothing without all of it.
@@ -856,5 +862,7 @@ test "labels from addresses" {
     try std.testing.expectEqualStrings("my-mac-rex", labelFor("https://my-mac-rex.tail0000.ts.net"));
     try std.testing.expectEqualStrings("127.0.0.1", labelFor("http://127.0.0.1:18765"));
     try std.testing.expectEqualStrings("box", labelFor("box:8765"));
+    try std.testing.expectEqualStrings("box", labelFor("ssh://alice@box.example:2222"));
+    try std.testing.expectEqualStrings("::1", labelFor("ssh://alice@[::1]:2222"));
     try std.testing.expectEqualStrings("This Computer", labelFor("unix:///run/user/1000/rex/server.sock"));
 }
