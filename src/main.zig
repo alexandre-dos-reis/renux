@@ -91,6 +91,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test {
+    _ = @import("app/awake.zig");
     _ = @import("rex/ws.zig");
     _ = @import("rex/ssh.zig");
     _ = @import("terminal/term.zig");
@@ -129,4 +130,5 @@ test {
     _ = @import("util/qr.zig");
     _ = @import("terminal/shader.zig");
     _ = @import("terminal/glide.zig");
+    _ = @import("app/small_actions.zig");
 }

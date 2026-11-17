@@ -25,19 +25,26 @@ and please report them as [issues](https://github.com/zenodea/renux/issues).
 - **Only the terminals.** Full screen mode hides the sidebar, the title rows and the window's
   own background, so the panes fill the window.
 - **Your agents at a glance.** Panes running coding agents show what they are doing, and the
-  agent board sorts them into Idle, Running, Attention and Done.
+  agent board sorts them into Idle, Running, Attention and Done. In Settings > Server > Agents,
+  **Keep this computer awake while an agent is working** asks your desktop to prevent suspend
+  and idle sleep while any connected pane reports working. It is off by default and releases
+  when work stops, the switch goes off, or Renux closes. Your desktop has the final say.
 - **Files for remote panes.** Drop files, or paste copied files or a clipboard image with
   Ctrl+Shift+V. Coding-agent panes also accept attachments with Ctrl+V. Rex uploads them and
   inserts their remote paths, in order, once all have arrived. The first file's name shows at
   the cursor and fills in as they go. Local panes insert local paths. Screenshots become PNG
   files. Each file can be up to 100 MB.
 - **Peek at files.** Ctrl+click a file path to see the file by it, locally or remotely: the
-  lines around the one named, in syntax colors, or the picture. Enter opens the file in your
+  lines around the one named, in syntax colors, a picture, or a PDF. In a PDF, Right/Left
+  and Page Down/Page Up turn pages; the name row shows the current page and total.
+  Enter opens the file in your
   editor in a new pane to the right (`nvim` by default; the Editor command setting changes
-  it), and Shift+Enter in a new window. For a picture, Enter opens your image viewer. Hold
+  it), and Shift+Enter in a new window. For a picture or PDF, Enter opens your desktop viewer. Hold
   Ctrl to underline a detected path; Esc closes the peek. For paths with ambiguous spacing,
   select the path and choose **Preview Selected Path** from the right-click menu, which
-  offers **Open With…** for other formats. Requires Rex API 13; files up to 16 MiB.
+  offers **Open With…** for other formats. **Quick Look** in the command palette lists the
+  files and links on the focused pane's screen; choose a file to peek at it. Web links open
+  your browser. Requires Rex API 13; files up to 16 MiB.
 - **Remote development links.** Ctrl+click an HTTP(S) localhost link with a port in a remote
   pane: Renux forwards it to a free port on this computer and opens the same path and query in
   your browser. Repeated clicks reuse the forward. **Forward Port…** in Commands discovers
@@ -106,6 +113,12 @@ foot of the sidebar.
 In the overview, the arrow keys or `h` `j` `k` `l` move between tabs, Enter goes to one and
 Escape goes back. `x` closes the tab the ring is on, `c` opens a new tab in its session and
 goes to it, and `s` groups the tabs by session.
+
+The command palette also offers **Mute or unmute tab**, **Switch host**, **Remove host…**,
+and **Refresh sessions**, plus clipboard and pane-management commands. Muting silences a
+tab's notifications, activity sounds and launcher badge for this run, without hiding its
+activity. Removing a host asks first and leaves its sessions running. See
+[the action audit](docs/action-coverage.md) for coverage and platform differences.
 
 ### Copy mode
 

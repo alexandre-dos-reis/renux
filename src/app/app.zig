@@ -303,6 +303,7 @@ pub const Host = struct {
     page: [:0]u8,
     /// Set for a host from $RENUX_SERVER, which isn't saved.
     temporary: bool = false,
+    muted_tabs: std.StringHashMapUnmanaged(void) = .empty,
 
     /// Its number among every host this run, which no later host shares.
     serial: usize = 0,
@@ -428,6 +429,7 @@ pub const App = struct {
     look_css: ?*gtk.CssProvider = null,
     last_dark: bool = true,
     badge_count: u32 = 0,
+    awake: @import("awake.zig").Inhibitor = .{},
     /// The session bus the launcher badge is sent on, once it has answered.
     badge_bus: ?*gio.DBusConnection = null,
     badge_bus_asked: bool = false,
@@ -456,6 +458,16 @@ pub const App = struct {
         return code;
     }
 
+    fn closingWindow(_: *gtk.Window, a: *App) callconv(.c) c_int {
+        // GTK drops its inhibitor backend during shutdown, before that signal reaches us.
+        a.awake.release(a.app.as(gtk.Application));
+        return 0;
+    }
+
+    pub fn awakeChanged(a: *App) void {
+        a.awake.sync(a);
+    }
+
     fn activate(_: *adw.Application, a: *App) callconv(.c) void {
         // GTK may have reset it while starting up.
         if (builtin.os.tag == .macos and std.c.getenv("RENUX_NOFOCUS") != null) @import("../platform/macos.zig").neverActivate();
@@ -480,6 +492,7 @@ pub const App = struct {
         useAppIcon();
         a.window = adw.ApplicationWindow.new(a.app.as(gtk.Application));
         const win = a.window.as(gtk.Window);
+        _ = gtk.Window.signals.close_request.connect(win, *App, &closingWindow, a, .{});
         win.setDefaultSize(1180, 760);
         // Development: RENUX_SIZE=WIDTHxHEIGHT starts the window at another size, and keeps it
         // there even on a smaller screen, for screenshots.
@@ -910,6 +923,7 @@ pub const App = struct {
             a.tabsChanged();
             a.headersChanged();
             a.viewsChanged();
+            a.awakeChanged();
             a.applyLook();
             a.setTight(settings.current.tight);
             a.redrawAll();
@@ -1408,14 +1422,18 @@ pub const App = struct {
             setSlot(&a.window_id, null);
             if (a.hosts.items.len > 0) a.selectHost(a.hosts.items[0]) else a.stack.setVisibleChildName("connect");
         }
+        var muted = h.muted_tabs.keyIterator();
+        while (muted.next()) |key| gpa.free(key.*);
+        h.muted_tabs.deinit(gpa);
         gpa.free(h.label);
         gpa.free(h.page);
         gpa.destroy(h);
+        a.awakeChanged();
         a.rebuildSidebar();
     }
 
     /// Shows a host's sessions in the content area.
-    fn selectHost(a: *App, h: *Host) void {
+    pub fn selectHost(a: *App, h: *Host) void {
         if (a.current == h) return;
         a.current = h;
         a.server = h.server;
@@ -1484,6 +1502,8 @@ pub const App = struct {
         const h: *Host = @ptrCast(@alignCast(ctx));
         const a = h.app;
         const here = a.current == h;
+        // Runs even for background hosts and a closed block's final notification.
+        if (what == .block or what == .view or what == .sessions or what == .state) a.awakeChanged();
         switch (what) {
             .state => {
                 if (here) {
@@ -1709,7 +1729,7 @@ pub const App = struct {
 
     /// Brings the sidebar, and with it the tabs, up to date before the next frame, however often
     /// it's asked: one change on a server asks several times over.
-    fn rebuildSidebar(a: *App) void {
+    pub fn rebuildSidebar(a: *App) void {
         a.sidebar_stale = true;
         // Rows of a host that was just removed can't wait: they point at it.
         for (a.rows.items) |r| if (r) |row| {
@@ -2398,6 +2418,7 @@ pub const App = struct {
         const st = &settings.current;
         if (!st.alerts) return;
         const s = h.server;
+        if (@import("small_actions.zig").muted(h, s.alert_block.items)) return;
         switch (s.alert_kind) {
             .blocked => if (!st.alert_blocked) return,
             .failed => if (!st.alert_error) return,
@@ -2683,11 +2704,11 @@ pub const App = struct {
     }
 
     /// The number of panes that need you, as a badge on the Dock or the desktop's launcher.
-    fn updateBadge(a: *App) void {
+    pub fn updateBadge(a: *App) void {
         var n: u32 = 0;
         if (settings.current.unread_badge) for (a.hosts.items) |h| {
-            var it = h.server.blocks.valueIterator();
-            while (it.next()) |b| if (b.attention) {
+            var it = h.server.blocks.iterator();
+            while (it.next()) |b| if (b.value_ptr.attention and !@import("small_actions.zig").muted(h, b.key_ptr.*)) {
                 n += 1;
             };
         };
@@ -3015,7 +3036,7 @@ pub const App = struct {
         if (is(action, "session.collapse")) return a.foldSessions(.current, true);
         if (is(action, "session.expand")) return a.foldSessions(.current, false);
         if (is(action, "session.collapse_others")) return a.foldSessions(.others, true);
-        return false;
+        return @import("small_actions.zig").perform(a, action);
     }
 
     pub fn toastText(a: *App, text: [:0]const u8) void {
@@ -3169,6 +3190,11 @@ pub const App = struct {
         }
         if (eql(u8, name, "go_to_directory")) return a.browse(.cd);
         if (eql(u8, name, "insert_path")) return a.browse(.insert);
+        if (eql(u8, name, "copy") or eql(u8, name, "paste")) {
+            const tv = (a.workspace orelse return false).focusedView() orelse return false;
+            if (eql(u8, name, "copy")) tv.copySelection(false) else tv.pasteClipboard();
+            return true;
+        }
         if (eql(u8, name, "select_all")) {
             const ws = a.workspace orelse return false;
             const tv = ws.focusedView() orelse return false;
@@ -3474,6 +3500,7 @@ pub const App = struct {
         dialog.addResponse("close", "Close Session");
         dialog.setResponseAppearance("close", .destructive);
         dialog.setDefaultResponse("cancel");
+        dialog.setCloseResponse("cancel");
         // The session and its host as they are now: another may be shown by the time it's answered.
         const ctx = a.renameCtxOn(host, sid, "", "") orelse return false;
         const Done = struct {

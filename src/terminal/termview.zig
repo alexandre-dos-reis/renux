@@ -28,6 +28,7 @@ const shader = @import("shader.zig");
 const fonts = @import("fonts.zig");
 const upload_ui = @import("../ui/upload.zig");
 const peek = @import("../ui/peek.zig");
+pub const ScreenLink = struct { url: [:0]u8, cell: [2]u16 };
 const glide_mod = @import("glide.zig");
 const copyview = @import("copyview.zig");
 
@@ -261,7 +262,7 @@ test "clipboard upload integration" {
 test "file hover targets preserve web and OSC8 links without reading files" {
     const t = term_mod.Term.create(80, 4) orelse return error.NoTerminal;
     defer t.destroy();
-    t.write("./result.png https://example.com/a.png\r\n\x1b]8;;file:///tmp/picture%20one.png\x1b\\picture\x1b]8;;\x1b\\");
+    t.write("./result.png https://example.com/a.png\r\n\x1b]8;;file:///tmp/picture%20one.png\x1b\\picture\x1b]8;;\x1b\\:42");
     try std.testing.expect(t.render(true));
     var path = TermView.textLinkAt(t, 3, 0) orelse return error.NoPath;
     defer path.deinit(gpa);
@@ -273,6 +274,15 @@ test "file hover targets preserve web and OSC8 links without reading files" {
     defer gpa.free(osc);
     try std.testing.expect(TermView.isFileLink(osc));
     try std.testing.expect(!TermView.isFileLink(url.url));
+    const targets = try TermView.screenLinksIn(t);
+    defer {
+        for (targets) |l| gpa.free(l.url);
+        gpa.free(targets);
+    }
+    try std.testing.expectEqual(@as(usize, 3), targets.len);
+    try std.testing.expectEqualStrings("renux-file:./result.png", targets[0].url);
+    try std.testing.expectEqualStrings("https://example.com/a.png", targets[1].url);
+    try std.testing.expectEqualStrings("renux-file:/tmp/picture one.png:42", targets[2].url);
 }
 
 /// The space around the text, from the settings.
@@ -2188,9 +2198,7 @@ pub const TermView = struct {
         return isFileLink(url) or v.linksOpenHere();
     }
 
-    /// The link at a cell: an OSC 8 hyperlink, or a web address written in the text.
-    fn linkAt(v: *TermView, t: *term_mod.Term, col: u16, row: u16) ?[:0]u8 {
-        _ = v;
+    fn hyperlinkTarget(t: *term_mod.Term, col: u16, row: u16) ?[:0]u8 {
         if (t.hyperlinkAt(col, row)) |u| {
             // Coding agents link the files they mention, often by a bare path such as
             // src/main.zig: that is a file on the pane's host, not an address to open.
@@ -2205,6 +2213,13 @@ pub const TermView = struct {
             const suffix = if (line) |n| std.fmt.bufPrint(&buf, ":{d}", .{n}) catch "" else "";
             return std.mem.concatWithSentinel(gpa, u8, &.{ file, suffix }, 0) catch null;
         }
+        return null;
+    }
+
+    /// The link at a cell: an OSC 8 hyperlink, or a path or address written in the text.
+    fn linkAt(v: *TermView, t: *term_mod.Term, col: u16, row: u16) ?[:0]u8 {
+        _ = v;
+        if (hyperlinkTarget(t, col, row)) |url| return url;
         var link = textLinkAt(t, col, row) orelse return null;
         defer link.deinit(gpa);
         return gpa.dupeSentinel(u8, link.url, 0) catch null;
@@ -2479,6 +2494,66 @@ pub const TermView = struct {
             .f_height = @intFromFloat(v.cell_h),
         };
         peek.show(v.widget(), at, v.server, v.session_id, v.block_id, target);
+    }
+
+    /// Files and links on the visible screen, without duplicates or a read of the filesystem.
+    pub fn screenLinks(v: *TermView) ![]ScreenLink {
+        return screenLinksIn(v.term() orelse return gpa.alloc(ScreenLink, 0));
+    }
+
+    fn screenLinksIn(t: *term_mod.Term) ![]ScreenLink {
+        const f = &t.frame;
+        var rows: std.ArrayList([]const u21) = .empty;
+        defer {
+            for (rows.items) |r| gpa.free(r);
+            rows.deinit(gpa);
+        }
+        for (0..f.rows) |y| {
+            const r = try gpa.alloc(u21, f.cols);
+            errdefer gpa.free(r);
+            for (0..f.cols) |x| r[x] = @intCast(@min(f.cell(x, y).cp, 0x10ffff));
+            try rows.append(gpa, r);
+        }
+        var found: std.ArrayList(ScreenLink) = .empty;
+        errdefer {
+            for (found.items) |l| gpa.free(l.url);
+            found.deinit(gpa);
+        }
+        for (0..f.rows) |y| {
+            var x: usize = 0;
+            while (x < f.cols) : (x += 1) {
+                const cell = f.cell(x, y);
+                if (cell.cp == 0 or cell.cp == ' ') continue;
+                var url: ?[:0]u8 = null;
+                if (cell.flags.link) {
+                    url = hyperlinkTarget(t, @intCast(x), @intCast(y));
+                } else {
+                    var link = (try links.at(gpa, rows.items, f.wraps.items, x, y)) orelse
+                        (try paths.at(gpa, rows.items, f.wraps.items, x, y)) orelse continue;
+                    defer link.deinit(gpa);
+                    url = try gpa.dupeSentinel(u8, link.url, 0);
+                    for (link.segments.items) |seg| if (seg.row == y) {
+                        x = @max(x, seg.end);
+                    };
+                }
+                const target = url orelse continue;
+                const duplicate = for (found.items) |l| {
+                    if (std.mem.eql(u8, l.url, target)) break true;
+                } else false;
+                if (duplicate) {
+                    gpa.free(target);
+                    continue;
+                }
+                errdefer gpa.free(target);
+                try found.append(gpa, .{ .url = target, .cell = .{ @intCast(x), @intCast(y) } });
+            }
+        }
+        return found.toOwnedSlice(gpa);
+    }
+
+    pub fn previewLink(v: *TermView, url: [:0]const u8, cell: [2]u16) void {
+        v.link_cell = cell;
+        v.openLink(url);
     }
 
     /// Opens the link at a cell as Ctrl+click does; for the development script.

@@ -4,7 +4,7 @@
 
 - Ctrl+hover underlines detected paths; Ctrl+click shows a peek by the path: the file's name
   with its language's icon, its size, and thirteen lines with the named one in the middle, or a
-  picture or the first page of a PDF as tall as those lines. Web URLs still open the browser. OSC 8 `file://` links peek at files on the
+  picture or a page of a PDF as tall as those lines. Web URLs still open the browser. OSC 8 `file://` links peek at files on the
   pane's host. The context menu's **Preview Selected Path** still opens the full preview.
 - In the peek, Enter opens a text file in an editor in a new pane to the right of the pane
   that named it, and Shift+Enter in a new window. A picture or a PDF goes to the desktop's own
@@ -31,8 +31,14 @@
   the same way backwards. GTK's own closing of a popover for a click elsewhere is at once, with
   no time to fade, so the peek closes itself: on Escape, a click outside it, or its window
   being left for another.
-- A PDF's first page is drawn by Poppler (`poppler-glib`) on a worker, with the number of pages
-  beside the size. One that can't be read, such as one that wants a password, offers
+- PDF pages are drawn by Poppler (`poppler-glib`) on a worker. Right and Left, or Page Down
+  and Page Up, turn pages, stopping at the ends. The name row says `page 2 of 65 · 429.2 KB`.
+  Enter still opens the desktop PDF viewer. There is one render in flight per peek; held keys
+  replace a single wanted page, rather than queuing a render for every key. A stale result
+  is discarded and the latest target rendered next. Each job owns immutable inputs and its
+  output until the main-thread callback, so closing during a render is safe. The picture's
+  paintable changes in place inside the existing fixed-size overlay.
+  One that can't be read, such as one that wants a password, offers
   **Open With…**. Not on a Mac, where Poppler isn't linked; the full preview dialog doesn't
   show PDFs either.
 - Path detection supports absolute/relative paths, `~`, filename extensions, quoted spaces,
@@ -168,7 +174,7 @@ but no examined official source proves that this is Rex.app's actual pipeline.
    not a Quick Look equivalent by itself. Never execute a remote filename through
    a shell or automatically launch executable/active content.
 
-Defer PDFs beyond the peek's first page, media breadth, custom preview plugins, automatic remote downloads and
+Defer media breadth, custom preview plugins, automatic remote downloads and
 persistent caches until transport completion/error semantics have been validated.
 The implementation keeps downloads separate from upload completion/paste behavior.
 

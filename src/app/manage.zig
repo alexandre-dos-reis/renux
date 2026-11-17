@@ -48,11 +48,11 @@ pub fn localServerUrl() ?[]u8 {
 }
 
 /// Settings > Server's group for setting coding agents up to use Rex on this computer.
-pub fn agentsGroup(p: *adw.PreferencesPage, a: *App) void {
-    if (!rexInstalled()) return;
+pub fn agentsGroup(p: *adw.PreferencesPage, a: *App) *adw.PreferencesGroup {
     const g = adw.PreferencesGroup.new();
     g.setTitle("Agents");
     p.add(g);
+    if (!rexInstalled()) return g;
     const agents = adw.ActionRow.new();
     agents.as(adw.PreferencesRow).setTitle("Coding agents");
     agents.setSubtitle("Let coding agents such as Claude Code use Rex");
@@ -63,6 +63,7 @@ pub fn agentsGroup(p: *adw.PreferencesPage, a: *App) void {
     _ = gtk.Button.signals.clicked.connect(setup, *App, &setupClicked, a, .{});
     agents.addSuffix(setup.as(gtk.Widget));
     g.add(agents.as(gtk.Widget));
+    return g;
 }
 
 fn setupClicked(_: *gtk.Button, a: *App) callconv(.c) void {

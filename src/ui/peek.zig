@@ -1,5 +1,5 @@
 //! A small look at a file named in a pane, shown by its path: what the file is, the lines
-//! around the one named, a picture, or a PDF's first page. Enter opens the file in an editor
+//! around the one named, a picture, or a PDF's pages. Enter opens the file in an editor
 //! in a new pane to the right, and Shift+Enter in a new window. A picture or a PDF goes to
 //! the desktop's own viewer.
 const std = @import("std");
@@ -65,7 +65,11 @@ pub fn visible() ?*gtk.Widget {
 pub fn press(key: []const u8) void {
     const p = open orelse return;
     if (std.mem.eql(u8, key, "escape")) return p.dismiss();
-    p.run(if (std.mem.eql(u8, key, "shift-enter")) .window else .beside);
+    if (std.mem.eql(u8, key, "right") or std.mem.eql(u8, key, "page-down")) {
+        _ = p.turnPage(true);
+    } else if (std.mem.eql(u8, key, "left") or std.mem.eql(u8, key, "page-up")) {
+        _ = p.turnPage(false);
+    } else p.run(if (std.mem.eql(u8, key, "shift-enter")) .window else .beside);
 }
 
 /// A path and the line named after it, as in `src/main.zig:42`.
@@ -102,8 +106,12 @@ const Peek = struct {
     transfer: ?*download.Download = null,
     data: ?*glib.Bytes = null,
     texture: ?*gdk.Texture = null,
-    /// How many pages a PDF has; the picture is of its first.
+    /// PDF indices are zero-based; only the latest requested page waits for the worker.
     pages: u32 = 0,
+    page: u32 = 0,
+    wanted_page: u32 = 0,
+    rendering: bool = false,
+    picture: ?*gtk.Picture = null,
     kind: Kind = .loading,
     /// A key pressed before Rex had said where the file is, kept until it has.
     waiting: ?How = null,
@@ -146,6 +154,7 @@ const Peek = struct {
             head.append(label(std.fmt.bufPrint(&buf, "line {d}", .{n}) catch "", "dim-label").as(gtk.Widget));
         }
         const meta = label("", "dim-label");
+        meta.setEllipsize(.end);
         meta.as(gtk.Widget).setHexpand(1);
         meta.setXalign(1);
         head.append(meta.as(gtk.Widget));
@@ -418,51 +427,95 @@ const Peek = struct {
         p.present();
     }
 
-    /// Decoding a large picture or drawing a page takes a moment, which a worker spends
-    /// instead. The peek goes on saying it is loading until the worker is done.
+    const Render = struct {
+        peek: *Peek,
+        bytes: *glib.Bytes,
+        kind: Kind,
+        page: u32,
+        texture: ?*gdk.Texture = null,
+        pages: u32 = 0,
+    };
+
+    /// The worker owns a snapshot, never mutable UI state. At most one render runs per peek.
     fn draw(p: *Peek, kind: Kind) void {
+        std.debug.assert(!p.rendering);
+        const job = gpa.create(Render) catch return p.fail("Not enough memory to show this file");
+        job.* = .{ .peek = p, .bytes = p.data.?.ref(), .kind = kind, .page = p.wanted_page };
         p.kind = kind;
+        p.rendering = true;
+        if (@import("build_options").dev and kind == .pdf) std.log.info("PDF render: page {d}", .{job.page + 1});
         p.refs += 1;
-        const task = gio.Task.new(p.pop.as(gobject.Object), null, &decoded, p);
-        task.setTaskData(p, null);
+        const task = gio.Task.new(p.pop.as(gobject.Object), null, &decoded, job);
+        task.setTaskData(job, null);
         task.runInThread(&decode);
         task.unref();
     }
 
     fn decode(task: *gio.Task, _: *gobject.Object, ctx: ?*anyopaque, _: ?*gio.Cancellable) callconv(.c) void {
-        const p: *Peek = @ptrCast(@alignCast(ctx.?));
-        if (p.kind == .pdf) {
+        const job: *Render = @ptrCast(@alignCast(ctx.?));
+        if (job.kind == .pdf) {
             // Twice the room the peek has, so the page is sharp on a dense screen.
-            if (pdf.firstPage(p.data.?, 1600, 1200)) |page| {
-                p.texture = page.texture;
-                p.pages = page.pages;
+            if (pdf.renderPage(job.bytes, job.page, 1600, 1200)) |page| {
+                job.texture = page.texture;
+                job.pages = page.pages;
             }
-        } else p.texture = gdk.Texture.newFromBytes(p.data.?, null);
+        } else job.texture = gdk.Texture.newFromBytes(job.bytes, null);
         task.returnBoolean(1);
     }
 
+    fn turnPage(p: *Peek, forward: bool) bool {
+        if (p.kind != .pdf) return false;
+        const wanted = pdf.nextPage(p.wanted_page, p.pages, forward);
+        if (wanted == p.wanted_page) return true;
+        p.wanted_page = wanted;
+        if (!p.rendering) p.draw(.pdf);
+        return true;
+    }
+
     fn decoded(_: ?*gobject.Object, result: *gio.AsyncResult, ctx: ?*anyopaque) callconv(.c) void {
-        const p: *Peek = @ptrCast(@alignCast(ctx.?));
-        defer p.unref();
+        const job: *Render = @ptrCast(@alignCast(ctx.?));
+        const p = job.peek;
+        defer {
+            if (job.texture) |t| t.as(gobject.Object).unref();
+            job.bytes.unref();
+            gpa.destroy(job);
+            p.unref();
+        }
         _ = @as(*gio.Task, @ptrCast(result)).propagateBoolean(null);
+        p.rendering = false;
         if (p.gone) return;
-        if (p.texture) |texture| {
-            const picture = gtk.Picture.newForPaintable(texture.as(gdk.Paintable));
-            picture.setCanShrink(1);
-            picture.setContentFit(.contain);
-            picture.as(gtk.Widget).addCssClass("peek-picture");
-            var buf: [64]u8 = undefined;
+        if (job.kind == .pdf and job.texture != null) {
+            p.pages = job.pages;
+            // Held keys change only the target. Skip a stale result and draw that target next.
+            if (job.page != p.wanted_page) return p.draw(.pdf);
+        }
+        if (job.texture) |texture| {
+            if (p.texture) |old| old.as(gobject.Object).unref();
+            p.texture = texture;
+            job.texture = null;
+            p.page = job.page;
+            if (p.picture) |picture| {
+                picture.setPaintable(texture.as(gdk.Paintable));
+            } else {
+                const picture = gtk.Picture.newForPaintable(texture.as(gdk.Paintable));
+                picture.setCanShrink(1);
+                picture.setContentFit(.contain);
+                picture.as(gtk.Widget).addCssClass("peek-picture");
+                p.picture = picture;
+                p.setBody(picture.as(gtk.Widget));
+            }
+            var buf: [96]u8 = undefined;
             var size: [32]u8 = undefined;
             const bytes = sizeText(&size, p.data.?.getSize());
             const text = if (p.kind == .pdf)
-                std.fmt.bufPrintSentinel(&buf, "{d} {s} · {s}", .{ p.pages, if (p.pages == 1) "page" else "pages", bytes }, 0) catch ""
+                std.fmt.bufPrintSentinel(&buf, "page {d} of {d} · {s}", .{ p.page + 1, p.pages, bytes }, 0) catch ""
             else
                 std.fmt.bufPrintSentinel(&buf, "{d} × {d} · {s}", .{ texture.getWidth(), texture.getHeight(), bytes }, 0) catch "";
             p.meta.setText(text.ptr);
-            p.setBody(picture.as(gtk.Widget));
         } else {
             const what: []const u8 = if (p.kind == .pdf) "This PDF couldn't be read" else "This picture couldn't be read";
             p.kind = .other;
+            p.picture = null;
             p.setBody(message(what));
         }
         p.refresh();
@@ -573,6 +626,8 @@ const Peek = struct {
         switch (keyval) {
             0xff0d, 0xff8d, 0xfe34 => p.run(if (shift) .window else .beside),
             0xff1b => p.dismiss(),
+            gdk.KEY_Right, gdk.KEY_Page_Down => return @intFromBool(p.turnPage(true)),
+            gdk.KEY_Left, gdk.KEY_Page_Up => return @intFromBool(p.turnPage(false)),
             else => return 0,
         }
         return 1;
