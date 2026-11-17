@@ -2572,6 +2572,11 @@ pub const TermView = struct {
     fn startCopyAnimation(v: *TermView, t: *term_mod.Term) void {
         // An earlier copy's lift isn't part of this one's picture.
         v.endCopyAnimation();
+        // The frame is the pane as it was last drawn. A selection made since then isn't in it:
+        // the third click of a triple-click selects the line and copies it at once, with the
+        // frame still showing the word the second click selected. The terminal is read again,
+        // so what lifts is what was copied.
+        _ = t.render(true);
         const f = &t.frame;
         var row: usize = 0;
         while (row < f.rows) : (row += 1) {
