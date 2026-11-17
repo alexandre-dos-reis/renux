@@ -54,8 +54,9 @@ owner and connection count, but no dial reference contract. Renux therefore does
 one. It uses the documented `rex -S <host URL> --autostart=false forward open --no-open
 --bind 127.0.0.1 --session <session> http://<destination>:<port>` child process.
 
-The first printed local URL supplies the allocated port. Output is read asynchronously and
-bounded before the address arrives, with a startup timeout. Browser URLs are rewritten from
+The first printed local URL supplies the allocated port. Output is read asynchronously, skipping
+notices until a loopback URL arrives and retaining the last other line if the CLI exits without
+one. Lines are bounded, with a startup timeout. Browser URLs are rewritten from
 the original target, not shell-expanded. Arguments are passed separately; inherited Rex
 server/session/block/client variables are removed. The child is interrupted to close the
 forward cleanly, then force-stopped after two seconds if necessary. Renux drains that cleanup

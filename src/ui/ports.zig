@@ -10,6 +10,7 @@ const json = @import("../util/json.zig");
 const Server = @import("../rex/server.zig").Server;
 const filterdialog = @import("filterdialog.zig");
 const icons = @import("../icons/icons.zig");
+const settings = @import("../settings/settings.zig");
 const gpa = std.heap.c_allocator;
 var dialogs: std.ArrayList(*Ports) = .empty;
 
@@ -26,12 +27,17 @@ pub fn show(parent: *gtk.Widget, server: *Server, sid: []const u8, bid: ?[]const
         gpa.destroy(p);
         return;
     };
-    const parts = filterdialog.build("Forward Port…", "Port, host:port, or HTTP(S) URL", 560, 480, "goto");
+    const parts = filterdialog.build("Forward Port…", "Port, host:port, or HTTP(S) URL", 520, 480, "goto");
     const status = gtk.Label.new(if (bid != null) "Looking for TCP ports in this pane…" else "Focus a terminal to discover its ports, or type a port above");
     status.setWrap(1);
     status.setXalign(0);
     status.as(gtk.Widget).addCssClass("goto-detail");
-    const location = gpa.dupeSentinel(u8, server.url, 0) catch null;
+    status.as(gtk.Widget).setMarginStart(14);
+    status.as(gtk.Widget).setMarginEnd(14);
+    const host_label = for (settings.current.hosts.items) |h| {
+        if (std.mem.eql(u8, h.url, server.url)) break h.label;
+    } else settings.labelFor(server.url);
+    const location = gpa.dupeSentinel(u8, host_label, 0) catch null;
     if (location) |z| {
         defer gpa.free(z);
         const label = gtk.Label.new(z.ptr);
@@ -47,6 +53,7 @@ pub fn show(parent: *gtk.Widget, server: *Server, sid: []const u8, bid: ?[]const
     const heading = gtk.Label.new("Open forwards · this window");
     heading.setXalign(0);
     heading.as(gtk.Widget).addCssClass("activity-heading");
+    heading.as(gtk.Widget).setMarginStart(6);
     parts.box.append(heading.as(gtk.Widget));
     const scroll = gtk.ScrolledWindow.new();
     scroll.setPolicy(.never, .automatic);

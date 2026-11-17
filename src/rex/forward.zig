@@ -109,6 +109,42 @@ fn launch(target: Target, port: u16, parent: ?*gtk.Window) void {
     launcher.launch(parent, null, null, null);
 }
 
+const StartupOutput = struct {
+    line: std.ArrayList(u8) = .empty,
+    notice: std.ArrayList(u8) = .empty,
+
+    fn deinit(output: *StartupOutput, allocator: std.mem.Allocator) void {
+        output.line.deinit(allocator);
+        output.notice.deinit(allocator);
+    }
+
+    fn feed(output: *StartupOutput, allocator: std.mem.Allocator, bytes: []const u8, eof: bool) !?u16 {
+        for (bytes) |byte| {
+            if (byte == '\n') {
+                if (try output.finishLine(allocator)) |port| return port;
+            } else {
+                if (output.line.items.len == 4096) return error.LineTooLong;
+                try output.line.append(allocator, byte);
+            }
+        }
+        return if (eof) output.finishLine(allocator) else null;
+    }
+
+    fn finishLine(output: *StartupOutput, allocator: std.mem.Allocator) !?u16 {
+        defer output.line.clearRetainingCapacity();
+        const line = std.mem.trim(u8, output.line.items, "\r");
+        if (line.len == 0) return null;
+        if (std.mem.indexOf(u8, line, "://") != null) {
+            if (Target.parse(line)) |address| {
+                if (address.loopback()) return address.port;
+            } else |_| {}
+        }
+        output.notice.clearRetainingCapacity();
+        if (std.unicode.utf8ValidateSlice(line)) try output.notice.appendSlice(allocator, line);
+        return null;
+    }
+};
+
 pub const Forward = struct {
     id: usize,
     server: *Server,
@@ -118,7 +154,8 @@ pub const Forward = struct {
     local_port: u16 = 0,
     parent: ?*gtk.Window = null,
     pending: std.ArrayList([]u8) = .empty,
-    output: std.ArrayList(u8) = .empty,
+    output: StartupOutput = .{},
+    process_exited: bool = false,
     refs: usize = 1,
     timer: c_uint = 0,
     stopped: bool = false,
@@ -162,8 +199,11 @@ pub const Forward = struct {
         if (std.mem.indexOfScalar(*Forward, active.items, f)) |i| _ = active.orderedRemove(i);
         generation += 1;
         if (f.timer != 0) _ = glib.Source.remove(f.timer);
-        f.process.sendSignal(@backingInt(std.posix.SIG.INT));
-        f.timer = glib.timeoutAdd(2000, &kill, f);
+        f.timer = 0;
+        if (!f.process_exited) {
+            f.process.sendSignal(@backingInt(std.posix.SIG.INT));
+            f.timer = glib.timeoutAdd(2000, &kill, f);
+        }
     }
 
     fn fail(f: *Forward, text: []const u8) void {
@@ -212,19 +252,12 @@ pub const Forward = struct {
             return f.fail("Couldn't read the Rex port forward's address");
         };
         defer bytes.unref();
-        if (f.stopped or bytes.getSize() == 0) return;
+        if (f.stopped) return;
         if (f.local_port == 0) {
-            const raw = bytes.getData(null).?[0..bytes.getSize()];
-            if (raw.len + f.output.items.len > 4096) return f.fail("Rex returned an invalid port-forward address");
-            f.output.appendSlice(gpa, raw) catch return f.fail("Not enough memory for port forwarding");
-            if (std.mem.indexOfScalar(u8, f.output.items, '\n')) |end| {
-                const line = std.mem.trim(u8, f.output.items[0..end], "\r");
-                const address = Target.parse(line) catch {
-                    if (std.unicode.utf8ValidateSlice(line)) f.fail(line) else f.fail("Rex couldn't create the port forward");
-                    return;
-                };
-                if (!address.loopback()) return f.fail("Rex returned a non-local listening address");
-                f.local_port = address.port;
+            const raw = if (bytes.getData(null)) |p| p[0..bytes.getSize()] else "";
+            const port = f.output.feed(gpa, raw, bytes.getSize() == 0) catch return f.fail("Couldn't read the Rex port-forward address");
+            if (port) |local_port| {
+                f.local_port = local_port;
                 if (f.timer != 0) _ = glib.Source.remove(f.timer);
                 f.timer = 0;
                 generation += 1;
@@ -237,19 +270,47 @@ pub const Forward = struct {
                 f.parent = null;
             }
         }
+        if (bytes.getSize() == 0) {
+            return f.fail(if (f.local_port != 0) "Port forward closed" else if (f.output.notice.items.len > 0) f.output.notice.items else "Rex couldn't create the port forward; check the host and update the Rex CLI/server");
+        }
         f.read();
     }
 
     fn exited(_: ?*gobject.Object, result: *gio.AsyncResult, data: ?*anyopaque) callconv(.c) void {
         const f: *Forward = @ptrCast(@alignCast(data.?));
         _ = f.process.waitFinish(result, null);
-        if (!f.stopped) f.fail(if (f.local_port == 0) "Rex couldn't create the port forward; check the host and update the Rex CLI/server" else "Port forward closed");
+        // The pipe may still have unread lines; EOF reports the last notice after draining it.
+        f.process_exited = true;
         if (f.timer != 0) _ = glib.Source.remove(f.timer);
         f.timer = 0;
         running -= 1;
         f.unref();
     }
 };
+
+test "a CLI notice before the loopback address does not fail a forward" {
+    const allocator = std.testing.allocator;
+    var output: StartupOutput = .{};
+    defer output.deinit(allocator);
+    try std.testing.expectEqual(@as(?u16, null), try output.feed(allocator, "Notice: reconnecting\r\nhttp://local", false));
+    try std.testing.expectEqual(@as(?u16, 4567), try output.feed(allocator, "host:4567\n", false));
+    try std.testing.expectEqualStrings("Notice: reconnecting", output.notice.items);
+
+    var together: StartupOutput = .{};
+    defer together.deinit(allocator);
+    try std.testing.expectEqual(@as(?u16, 8000), try together.feed(allocator, "Notice: readying the tunnel\nhttp://127.0.0.1:8000\n", false));
+}
+
+test "CLI output keeps the last error line when no local address arrives" {
+    const allocator = std.testing.allocator;
+    var output: StartupOutput = .{};
+    defer output.deinit(allocator);
+    try std.testing.expectEqual(@as(?u16, null), try output.feed(allocator, "Notice: trying host\nhttp://remote:8000\nError: permission denied", false));
+    try std.testing.expectEqual(@as(?u16, null), try output.feed(allocator, "", true));
+    try std.testing.expectEqualStrings("Error: permission denied", output.notice.items);
+    const oversized: [4097]u8 = @splat('x');
+    try std.testing.expectError(error.LineTooLong, output.feed(allocator, &oversized, false));
+}
 
 test "remote localhost links require an exact loopback host and explicit valid port" {
     for ([_][]const u8{ "http://localhost:3000", "https://LOCALHOST:443/x?q=1#top", "http://127.0.0.1:8000", "http://[::1]:8000", "http://0.0.0.0:8000" }) |url| {
