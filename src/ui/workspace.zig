@@ -9,6 +9,7 @@
 //! and fade out when they go.
 const std = @import("std");
 const glib = @import("glib");
+const gio = @import("gio");
 const gobject = @import("gobject");
 const gtk = @import("gtk");
 const graphene = @import("graphene");
@@ -120,7 +121,58 @@ const Divider = struct {
     after_id: []u8,
 };
 
-const Minimized = struct { layer_id: []u8, block_id: []u8, button: *gtk.Widget, label: *gtk.Label };
+/// The edge of the workspace a minimized pane's chip keeps to.
+const Edge = enum { bottom, top, left, right };
+
+/// Where a chip was put by hand, kept by its layer for as long as the window runs: its edge,
+/// its turn among the chips there, and how far along the edge it stays when it was dropped
+/// clear of the others' row (0 when it joined the row).
+const Dock = struct { edge: Edge, rank: u32, along: f64 };
+
+/// A chip nobody has moved takes its turn after those somebody has, oldest first.
+const unranked = std.math.maxInt(u32);
+
+/// The room chips keep from the workspace's edges and from each other, and how near the
+/// place the row has for it a dropped chip must be to join the row.
+const chip_pad: f64 = 10;
+const chip_gap: f64 = 6;
+const chip_snap: f64 = 24;
+/// Chips make room for one another as the sidebar's rows do for a session being moved, and a
+/// chip let go settles as the session does: the same times and the same curves.
+const chip_shift_us: f64 = 220_000;
+const chip_settle_us: f64 = 170_000;
+
+const Minimized = struct {
+    layer_id: []u8,
+    block_id: []u8,
+    button: *gtk.Widget,
+    label: *gtk.Label,
+    edge: Edge = .bottom,
+    rank: u32 = unranked,
+    along: f64 = 0,
+    size: [2]f64 = .{ 0, 0 },
+    /// Where it is drawn, and where it belongs. Between the two it is on its way from `from`
+    /// since `began`, making room for another chip or settling after being let go.
+    cur: [2]f64 = .{ 0, 0 },
+    to: [2]f64 = .{ 0, 0 },
+    from: [2]f64 = .{ 0, 0 },
+    began: i64 = 0,
+    settling: bool = false,
+    placed: bool = false,
+};
+
+/// A chip taken hold of: where on it, whether it has moved far enough to be carried and not
+/// clicked, and, worked out at each layout, the edge it would keep to if let go now, its turn
+/// there and how far along it would stay.
+const ChipDrag = struct {
+    button: *gtk.Widget,
+    grab: [2]f64,
+    carried: bool = false,
+    edge: Edge = .bottom,
+    along: f64 = 0,
+    order: [64]usize = undefined,
+    count: usize = 0,
+};
 
 pub const Workspace = struct {
     pub fn isTight() bool {
@@ -147,7 +199,6 @@ pub const Workspace = struct {
     swap_arrows: *gtk.Widget,
     target_cur: [4]f64 = .{ 0, 0, 0, 0 },
     target_vel: [4]f64 = .{ 0, 0, 0, 0 },
-    tray: *gtk.Box,
     empty: *gtk.Widget,
     server: *Server,
     session_id: ?[]u8 = null,
@@ -156,6 +207,13 @@ pub const Workspace = struct {
     panes: std.ArrayList(Pane) = .empty,
     dividers: std.ArrayList(Divider) = .empty,
     minimized: std.ArrayList(Minimized) = .empty,
+    /// Where chips were put by hand, by layer.
+    docks: std.StringHashMapUnmanaged(Dock) = .empty,
+    chip_drag: ?ChipDrag = null,
+    /// A carried chip was let go just now: the click that letting go may also count as is
+    /// not one. Cleared once that click is over, by `chip_idle`.
+    chip_let_go: bool = false,
+    chip_idle: c_uint = 0,
 
     // Dragging.
     resizing: ?usize = null,
@@ -214,14 +272,11 @@ pub const Workspace = struct {
         arrows.as(gtk.Widget).setValign(.center);
         arrows.as(gtk.Widget).setVisible(0);
         target.append(arrows.as(gtk.Widget));
-        const tray = gtk.Box.new(.horizontal, 6);
-        tray.as(gtk.Widget).addCssClass("tray");
 
         // The workspace owns these, since it moves them above the cards by re-parenting.
         _ = ghost.as(gobject.Object).refSink();
         _ = target.as(gobject.Object).refSink();
         _ = line.as(gobject.Object).refSink();
-        _ = tray.as(gobject.Object).refSink();
 
         // What a session without windows shows: a way to open one.
         const empty = gtk.Box.new(.vertical, 12);
@@ -240,7 +295,7 @@ pub const Workspace = struct {
         ew.setVisible(0);
         ew.setParent(root);
 
-        ws.* = .{ .root = root, .ghost = ghost.as(gtk.Widget), .target = target.as(gtk.Widget), .line = line.as(gtk.Widget), .swap_arrows = arrows.as(gtk.Widget), .tray = tray, .empty = ew, .server = server };
+        ws.* = .{ .root = root, .ghost = ghost.as(gtk.Widget), .target = target.as(gtk.Widget), .line = line.as(gtk.Widget), .swap_arrows = arrows.as(gtk.Widget), .empty = ew, .server = server };
         gobject.Object.setData(root.as(gobject.Object), "renux-workspace", ws);
 
         const drag = gtk.GestureDrag.new();
@@ -360,7 +415,7 @@ pub const Workspace = struct {
     }
 
     /// Floating layers draw over every tiled pane, in the server's order, back to front; the
-    /// drop target, the carried card and the tray stay above them all. Children only move when
+    /// drop target, the carried card and the chips stay above them all. Children only move when
     /// that order isn't already the one on screen, since moving one lays the workspace out again.
     fn restack(ws: *Workspace, w: *const view.Window) void {
         var want: std.ArrayList(*gtk.Widget) = .empty;
@@ -369,7 +424,11 @@ pub const Workspace = struct {
             if (!layer.floating or layer.minimized) continue;
             for (ws.panes.items) |p| if (p.floating and std.mem.eql(u8, p.layer_id, layer.id)) want.append(gpa, p.frame) catch {};
         };
-        want.appendSlice(gpa, &.{ ws.line, ws.target, ws.ghost, ws.tray.as(gtk.Widget) }) catch {};
+        want.appendSlice(gpa, &.{ ws.line, ws.target, ws.ghost }) catch {};
+        // A chip being carried is over the other chips.
+        const carried: ?*gtk.Widget = if (ws.chip_drag) |d| (if (d.carried) d.button else null) else null;
+        for (ws.minimized.items) |m| if (m.button != carried) want.append(gpa, m.button) catch {};
+        if (carried) |c| want.append(gpa, c) catch {};
         // Compare with the children at the top, skipping the cards behind joined layers, which
         // `joinLayers` places itself.
         var child = ws.root.getLastChild();
@@ -447,10 +506,15 @@ pub const Workspace = struct {
         // The layout and the gestures on `root` find the workspace through this.
         gobject.Object.setData(ws.root.as(gobject.Object), "renux-workspace", null);
         ws.empty.unparent();
-        inline for (.{ ws.ghost, ws.target, ws.line, ws.tray.as(gtk.Widget) }) |w| {
+        inline for (.{ ws.ghost, ws.target, ws.line }) |w| {
             if (w.getParent() != null) w.unparent();
             w.as(gobject.Object).unref();
         }
+        ws.clearTray();
+        if (ws.chip_idle != 0) _ = glib.Source.remove(ws.chip_idle);
+        var docks = ws.docks.keyIterator();
+        while (docks.next()) |key| gpa.free(key.*);
+        ws.docks.deinit(gpa);
         // The gestures on `root` hold this pointer; without their widget they never fire again.
         ws.root.setCanTarget(0);
         ws.panes.deinit(gpa);
@@ -475,8 +539,9 @@ pub const Workspace = struct {
     }
 
     fn clearTray(ws: *Workspace) void {
+        ws.chip_drag = null;
         for (ws.minimized.items) |m| {
-            ws.tray.remove(m.button);
+            m.button.unparent();
             gpa.free(m.layer_id);
             gpa.free(m.block_id);
         }
@@ -484,7 +549,8 @@ pub const Workspace = struct {
     }
 
     /// Shows a chip for each minimized layer. Chips that are already right stay as they are,
-    /// keeping their hover and their place; only a change to the set rebuilds them.
+    /// keeping their hover and their place; only a change to the set rebuilds them, and the
+    /// ones that stay then glide from where they were to where they belong now.
     fn syncTray(ws: *Workspace, w: *const view.Window) void {
         var same = true;
         var n: usize = 0;
@@ -498,22 +564,341 @@ pub const Workspace = struct {
             return;
         }
         ws.noteRestored(w);
+        // Where each chip was, by its layer, for the chip made in its stead.
+        const Was = struct { layer: u64, cur: [2]f64, to: [2]f64 };
+        var was: [64]Was = undefined;
+        var kept: usize = 0;
+        for (ws.minimized.items) |m| if (m.placed and kept < was.len) {
+            was[kept] = .{ .layer = std.hash.Wyhash.hash(0, m.layer_id), .cur = m.cur, .to = m.to };
+            kept += 1;
+        };
         ws.clearTray();
         if (w.zoomed_block_id == null) for (w.layers) |layer| {
             if (layer.floating and layer.minimized and layer.blocks.len > 0) ws.addToTray(layer.id, layer.blocks[0].id);
         };
+        for (ws.minimized.items) |*m| {
+            const layer = std.hash.Wyhash.hash(0, m.layer_id);
+            for (was[0..kept]) |old| if (old.layer == layer) {
+                m.cur = old.cur;
+                m.to = old.to;
+                m.placed = true;
+            };
+        }
     }
 
-    /// Where a layer's chip sits in the tray, or where the next chip will go if it has no
-    /// place yet (it was made a moment ago).
+    /// Where a layer's chip belongs, or where the next chip will go if the layer has none yet:
+    /// after the last on the bottom edge.
     fn chipRect(ws: *Workspace, layer_id: []const u8) [4]f64 {
-        const tray = ws.tray.as(gtk.Widget);
-        for (ws.minimized.items) |m| if (std.mem.eql(u8, m.layer_id, layer_id)) {
-            var b: graphene.Rect = undefined;
-            if (m.button.getWidth() > 0 and m.button.computeBounds(ws.root, &b) != 0) return .{ b.f_origin.f_x, b.f_origin.f_y, b.f_size.f_width, b.f_size.f_height };
+        for (ws.minimized.items) |*m| if (std.mem.eql(u8, m.layer_id, layer_id)) {
+            if (!m.placed) ws.placeChips(ws.width(), ws.height());
+            return .{ m.to[0], m.to[1], m.size[0], m.size[1] };
         };
-        const tw: f64 = @floatFromInt(tray.getWidth());
-        return .{ 10 + tw, ws.height() - 42, 120, 32 };
+        var x = chip_pad;
+        for (ws.minimized.items) |m| if (m.edge == .bottom and m.placed) {
+            x = @max(x, m.to[0] + m.size[0] + chip_gap);
+        };
+        return .{ x, ws.height() - 42, 120, 32 };
+    }
+
+    // Chips keep to the workspace's edges. One nobody has moved is on the bottom edge, in the
+    // row that starts at its left end, as all of them were before they could be moved. A chip
+    // can be carried anywhere and let go: it then keeps to the nearest edge, where it was let
+    // go, and the chips already there make room for it.
+
+    fn chipIndex(ws: *Workspace, button: *gtk.Widget) ?usize {
+        for (ws.minimized.items, 0..) |m, i| if (m.button == button) return i;
+        return null;
+    }
+
+    /// The chip being carried, if one is.
+    fn carriedChip(ws: *Workspace) ?usize {
+        const d = ws.chip_drag orelse return null;
+        return if (d.carried) ws.chipIndex(d.button) else null;
+    }
+
+    /// Works out where every chip belongs and sets it on its way there.
+    fn placeChips(ws: *Workspace, w: f64, h: f64) void {
+        if (ws.minimized.items.len == 0) return;
+        const carried = ws.carriedChip();
+        var min: c_int = 0;
+        var nat: c_int = 0;
+        // How tall the rows along the bottom and the top are.
+        var rows = [2]f64{ 0, 0 };
+        for (ws.minimized.items, 0..) |*m, i| {
+            m.button.measure(.horizontal, -1, &min, &nat, null, null);
+            m.size[0] = @max(1, @min(@as(f64, @floatFromInt(nat)), w - 2 * chip_pad));
+            m.button.measure(.vertical, -1, &min, &nat, null, null);
+            m.size[1] = @floatFromInt(nat);
+            switch (if (carried == i) ws.chip_drag.?.edge else m.edge) {
+                .bottom => rows[0] = @max(rows[0], m.size[1]),
+                .top => rows[1] = @max(rows[1], m.size[1]),
+                else => {},
+            }
+        }
+        // The rows along the bottom and the top have the corners; the columns down the sides
+        // run between them.
+        const lo = chip_pad + (if (rows[1] > 0) rows[1] + chip_gap else 0);
+        const hi = h - chip_pad - (if (rows[0] > 0) rows[0] + chip_gap else 0);
+        inline for (.{ Edge.bottom, Edge.top, Edge.left, Edge.right }) |edge| ws.packEdge(edge, carried, w, h, lo, hi);
+    }
+
+    /// Places the chips of one edge: each as far along as it was put, or right after the one
+    /// before it when that is further, and pushed back from the far end when they run past it.
+    fn packEdge(ws: *Workspace, edge: Edge, carried: ?usize, w: f64, h: f64, lo: f64, hi: f64) void {
+        const items = ws.minimized.items;
+        const axis: usize = if (edge == .bottom or edge == .top) 0 else 1;
+        const start = if (axis == 0) chip_pad else lo;
+        const end = if (axis == 0) w - chip_pad else hi;
+        var order: [64]usize = undefined;
+        var n: usize = 0;
+        // In turn: by rank, and for chips of one rank in the order the server has them.
+        for (items, 0..) |m, i| {
+            if (carried == i or m.edge != edge or n == order.len) continue;
+            var k = n;
+            while (k > 0 and items[order[k - 1]].rank > m.rank) : (k -= 1) order[k] = order[k - 1];
+            order[k] = i;
+            n += 1;
+        }
+        if (carried) |c| if (ws.chip_drag.?.edge == edge and n < order.len) {
+            // The carried chip takes its turn where it is held: after every chip whose middle
+            // its own middle has passed, as a session being moved in the sidebar does.
+            const d = &ws.chip_drag.?;
+            const m = &items[c];
+            const mid = m.cur[axis] + m.size[axis] / 2;
+            var at = start;
+            // Where the row that starts at the edge's near end has got to.
+            var row = start;
+            var index: usize = 0;
+            for (order[0..n]) |i| {
+                const o = &items[i];
+                const pos = @max(at, o.along);
+                if (mid < pos + o.size[axis] / 2) break;
+                at = pos + o.size[axis] + chip_gap;
+                if (o.along == 0) row = at;
+                index += 1;
+            }
+            // Held before the place the chips ahead of it leave for it, or only a little past
+            // it, it joins them: in the row from the near end it stays part of the row, and
+            // beside a chip put further along it stays beside that chip. Held clear of them,
+            // it keeps the place it is held at.
+            const near = m.cur[axis] - at <= chip_snap;
+            d.along = if (!near) @min(m.cur[axis], end - m.size[axis]) else if (@abs(at - row) < 0.5) 0 else at;
+            var k = n;
+            while (k > index) : (k -= 1) order[k] = order[k - 1];
+            order[index] = c;
+            n += 1;
+            d.order = order;
+            d.count = n;
+        };
+        if (n == 0) return;
+        var pos: [64]f64 = undefined;
+        var at = start;
+        for (order[0..n], 0..) |i, k| {
+            const along = if (carried == i) ws.chip_drag.?.along else items[i].along;
+            pos[k] = @max(at, along);
+            at = pos[k] + items[i].size[axis] + chip_gap;
+        }
+        var limit = end;
+        var k = n;
+        while (k > 0) {
+            k -= 1;
+            pos[k] = @max(start, @min(pos[k], limit - items[order[k]].size[axis]));
+            limit = pos[k] - chip_gap;
+        }
+        for (order[0..n], 0..) |i, at_k| {
+            const m = &items[i];
+            const to: [2]f64 = switch (edge) {
+                .bottom => .{ pos[at_k], h - chip_pad - m.size[1] },
+                .top => .{ pos[at_k], chip_pad },
+                .left => .{ chip_pad, pos[at_k] },
+                .right => .{ w - chip_pad - m.size[0], pos[at_k] },
+            };
+            // A chip seen for the first time, or shown for another window, is put straight
+            // where it belongs.
+            if (!m.placed or ws.snap) {
+                m.placed = true;
+                m.to = to;
+                if (carried != i) {
+                    m.cur = to;
+                    m.began = 0;
+                }
+                continue;
+            }
+            if (@abs(to[0] - m.to[0]) < 0.5 and @abs(to[1] - m.to[1]) < 0.5) continue;
+            m.to = to;
+            // The carried chip is where the pointer has it; this is where it goes when let go.
+            if (carried == i) continue;
+            m.from = m.cur;
+            m.began = glib.getMonotonicTime();
+            m.settling = false;
+        }
+    }
+
+    /// Moves each chip that is on its way a frame further. True while any still is.
+    fn moveChips(ws: *Workspace, now: i64) bool {
+        var moving = false;
+        for (ws.minimized.items) |*m| {
+            if (m.began == 0) continue;
+            const took = if (m.settling) chip_settle_us else chip_shift_us;
+            const p = std.math.clamp(@as(f64, @floatFromInt(now - m.began)) / took, 0, 1);
+            // Settling is fast at first and eases into place, as a session let go in the
+            // sidebar is; making room follows the curve the sidebar's rows do.
+            const e = if (m.settling) 1 - std.math.pow(f64, 1 - p, 3) else bezier(0.2, 0.9, 0.3, 1, p);
+            m.cur = .{ m.from[0] + (m.to[0] - m.from[0]) * e, m.from[1] + (m.to[1] - m.from[1]) * e };
+            if (p >= 1) {
+                m.cur = m.to;
+                m.began = 0;
+            } else moving = true;
+        }
+        return moving;
+    }
+
+    /// The chip that was only pressed is now being carried: it is lifted over the others.
+    fn liftChip(ws: *Workspace) void {
+        const d = &(ws.chip_drag orelse return);
+        d.carried = true;
+        if (ws.chipIndex(d.button)) |i| d.edge = ws.minimized.items[i].edge;
+        d.button.addCssClass("carried");
+        d.button.insertBefore(ws.root, null);
+    }
+
+    /// Carries the chip so the point of it that was taken hold of is at a point of the
+    /// workspace.
+    fn carryChip(ws: *Workspace, x: f64, y: f64) void {
+        const d = &(ws.chip_drag orelse return);
+        const i = ws.chipIndex(d.button) orelse return;
+        const m = &ws.minimized.items[i];
+        const w = ws.width();
+        const h = ws.height();
+        m.cur = .{ std.math.clamp(x - d.grab[0], 0, @max(0, w - m.size[0])), std.math.clamp(y - d.grab[1], 0, @max(0, h - m.size[1])) };
+        m.began = 0;
+        // It will keep to the edge its middle is nearest. The edge it is headed for holds on
+        // a little, so the chips there don't jump back and forth near a corner.
+        const mid = [2]f64{ m.cur[0] + m.size[0] / 2, m.cur[1] + m.size[1] / 2 };
+        var far = [4]f64{ h - mid[1], mid[1], mid[0], w - mid[0] };
+        far[@intFromEnum(d.edge)] -= 12;
+        var best: usize = 0;
+        for (far, 0..) |f, k| if (f < far[best]) {
+            best = k;
+        };
+        d.edge = @enumFromInt(best);
+        ws.root.queueAllocate();
+    }
+
+    /// Lets the carried chip go: it keeps to the edge it is nearest, where it is, takes its
+    /// turn among the chips there, and settles into its place.
+    fn dropChip(ws: *Workspace) void {
+        const held = ws.chip_drag orelse return;
+        if (!held.carried) {
+            ws.chip_drag = null;
+            return;
+        }
+        ws.placeChips(ws.width(), ws.height());
+        const d = ws.chip_drag.?;
+        ws.chip_drag = null;
+        d.button.removeCssClass("carried");
+        // Letting go may still count as a click on the chip, which would bring its pane
+        // back: that click is passed over.
+        ws.chip_let_go = true;
+        if (ws.chip_idle == 0) ws.chip_idle = glib.idleAdd(&chipLetGoOver, ws);
+        const i = ws.chipIndex(d.button) orelse return;
+        const m = &ws.minimized.items[i];
+        m.edge = d.edge;
+        m.along = d.along;
+        // Every chip on that edge now has its turn, and keeps it.
+        for (d.order[0..d.count], 0..) |at, turn| {
+            if (at >= ws.minimized.items.len) continue;
+            ws.minimized.items[at].rank = @intCast(turn);
+            ws.remember(&ws.minimized.items[at]);
+        }
+        m.from = m.cur;
+        m.began = glib.getMonotonicTime();
+        m.settling = true;
+        ws.root.queueAllocate();
+        ws.startTick();
+    }
+
+    /// Keeps where a chip was put, for when its chip is made again.
+    fn remember(ws: *Workspace, m: *const Minimized) void {
+        const home = ws.preview_of orelse ws;
+        const dock: Dock = .{ .edge = m.edge, .rank = m.rank, .along = m.along };
+        if (home.docks.getPtr(m.layer_id)) |slot| {
+            slot.* = dock;
+            return;
+        }
+        const key = gpa.dupe(u8, m.layer_id) catch return;
+        home.docks.put(gpa, key, dock) catch gpa.free(key);
+    }
+
+    fn chipLetGoOver(data: ?*anyopaque) callconv(.c) c_int {
+        const ws: *Workspace = @ptrCast(@alignCast(data.?));
+        ws.chip_idle = 0;
+        ws.chip_let_go = false;
+        return 0;
+    }
+
+    /// A click on a chip brings its pane back.
+    fn chipClicked(button: *gtk.Button, ws: *Workspace) callconv(.c) void {
+        if (ws.chip_let_go) return;
+        const i = ws.chipIndex(button.as(gtk.Widget)) orelse return;
+        const app = gio.Application.getDefault() orelse return;
+        const layer = gpa.dupeSentinel(u8, ws.minimized.items[i].layer_id, 0) catch return;
+        defer gpa.free(layer);
+        app.as(gio.ActionGroup).activateAction("restore-layer", glib.Variant.newString(layer.ptr));
+    }
+
+    const ChipGesture = struct {
+        fn begin(g: *gtk.GestureDrag, x: f64, y: f64, ws: *Workspace) callconv(.c) void {
+            const button = g.as(gtk.EventController).getWidget() orelse return;
+            ws.chip_drag = .{ .button = button, .grab = .{ x, y } };
+        }
+        fn update(g: *gtk.GestureDrag, dx: f64, dy: f64, ws: *Workspace) callconv(.c) void {
+            const d = &(ws.chip_drag orelse return);
+            if (!d.carried) {
+                // A press that barely moves is a click, which brings the pane back.
+                if (@abs(dx) < 6 and @abs(dy) < 6) return;
+                _ = g.as(gtk.Gesture).setState(.claimed);
+                ws.liftChip();
+            }
+            // The chip moves with the pointer, so the pointer's place is taken in the
+            // workspace, which stays put; see `steadyOffset`.
+            var sx: f64 = 0;
+            var sy: f64 = 0;
+            if (g.getStartPoint(&sx, &sy) == 0) return;
+            var px: f64 = 0;
+            var py: f64 = 0;
+            if (d.button.translateCoordinates(ws.root, sx + dx, sy + dy, &px, &py) == 0) return;
+            ws.carryChip(px, py);
+        }
+        fn end(_: *gtk.GestureDrag, _: f64, _: f64, ws: *Workspace) callconv(.c) void {
+            ws.dropChip();
+        }
+        fn cancel(_: *gtk.GestureDrag, _: ?*gdk.EventSequence, ws: *Workspace) callconv(.c) void {
+            ws.dropChip();
+        }
+    };
+
+    /// Development: takes hold of the nth chip by its middle and carries it to a point of the
+    /// workspace, carries it on, and lets it go, as the pointer would.
+    pub fn simulateChipCarry(ws: *Workspace, n: usize, x: f64, y: f64) void {
+        if (n >= ws.minimized.items.len) return;
+        const m = ws.minimized.items[n];
+        ws.chip_drag = .{ .button = m.button, .grab = .{ m.size[0] / 2, m.size[1] / 2 } };
+        ws.liftChip();
+        ws.carryChip(x, y);
+    }
+
+    pub fn simulateChipMove(ws: *Workspace, x: f64, y: f64) void {
+        ws.carryChip(x, y);
+    }
+
+    pub fn simulateChipDrop(ws: *Workspace) void {
+        ws.dropChip();
+    }
+
+    /// Development: logs where each chip is and where it belongs.
+    pub fn chipReport(ws: *Workspace) void {
+        for (ws.minimized.items, 0..) |m, i| std.log.info("chip {d}: edge {s} rank {d} along {d:.1} at {d:.1},{d:.1} going to {d:.1},{d:.1}", .{ i, @tagName(m.edge), m.rank, m.along, m.cur[0], m.cur[1], m.to[0], m.to[1] });
     }
 
     /// Notes where the chips are that the window no longer has, so the cards coming back
@@ -845,20 +1230,31 @@ pub const Workspace = struct {
         button.setChild(line.as(gtk.Widget));
         button.as(gtk.Widget).addCssClass("tray-chip");
         button.as(gtk.Widget).setTooltipText("Bring back");
-        const target = gpa.dupeSentinel(u8, layer_id, 0) catch return;
-        defer gpa.free(target);
-        button.as(gtk.Actionable).setActionName("app.restore-layer");
-        button.as(gtk.Actionable).setActionTargetValue(glib.Variant.newString(target.ptr));
+        _ = gtk.Button.signals.clicked.connect(button, *Workspace, &chipClicked, ws, .{});
         // A chip whose card is still on its way stays unseen until the card lands on it.
         for (ws.leaving.items) |l| if (l.to_layer) |t| {
             if (std.mem.eql(u8, t, layer_id)) button.as(gtk.Widget).setOpacity(0);
         };
-        ws.tray.append(button.as(gtk.Widget));
+        // It can be carried to another place. The gesture hears the press before the button
+        // does, and takes it from the button once it is clearly no click.
+        const drag = gtk.GestureDrag.new();
+        drag.as(gtk.EventController).setPropagationPhase(.capture);
+        _ = gtk.GestureDrag.signals.drag_begin.connect(drag, *Workspace, &ChipGesture.begin, ws, .{});
+        _ = gtk.GestureDrag.signals.drag_update.connect(drag, *Workspace, &ChipGesture.update, ws, .{});
+        _ = gtk.GestureDrag.signals.drag_end.connect(drag, *Workspace, &ChipGesture.end, ws, .{});
+        _ = gtk.Gesture.signals.cancel.connect(drag, *Workspace, &ChipGesture.cancel, ws, .{});
+        button.as(gtk.Widget).addController(drag.as(gtk.EventController));
+        button.as(gtk.Widget).setParent(ws.root);
+        // It goes back where it was put the last time, if it was put anywhere.
+        const dock: Dock = (ws.preview_of orelse ws).docks.get(layer_id) orelse .{ .edge = .bottom, .rank = unranked, .along = 0 };
         ws.minimized.append(gpa, .{
             .layer_id = gpa.dupe(u8, layer_id) catch return,
             .block_id = gpa.dupe(u8, block_id) catch return,
             .button = button.as(gtk.Widget),
             .label = label,
+            .edge = dock.edge,
+            .rank = dock.rank,
+            .along = dock.along,
         }) catch {};
     }
 
@@ -1686,6 +2082,7 @@ pub const Workspace = struct {
         }
         if (ws.leaving.items.len > 0) busy = true;
         if (ws.target.getVisible() != 0 and !springStep(&ws.target_cur, &ws.target_vel, ws.targetRect(), dt, decay)) busy = true;
+        if (ws.moveChips(now)) busy = true;
         ws.root.queueAllocate();
         if (!busy) {
             ws.tick = 0;
@@ -1899,19 +2296,18 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
     if (ws.target.getVisible() != 0) allocateAt(ws.target, ws.target_cur);
     if (ws.line.getParent() != null) allocateAt(ws.line, ws.lineRect() orelse .{ 0, 0, 1, 1 });
     if (ws.ghost.getVisible() != 0) allocateAt(ws.ghost, .{ ws.pointer[0] - 75, ws.pointer[1] - 46, 150, 92 });
-    ws.snap = false;
     if (moving or ws.leaving.items.len > 0) ws.startTick();
     var all: gtk.Allocation = .{ .f_x = 0, .f_y = 0, .f_width = width, .f_height = height };
     if (ws.empty.getVisible() != 0) ws.empty.sizeAllocate(&all, -1);
-    // The tray sits at the bottom left, as wide as its chips.
-    var min: c_int = 0;
-    var nat: c_int = 0;
-    ws.tray.as(gtk.Widget).measure(.horizontal, -1, &min, &nat, null, null);
-    var th_min: c_int = 0;
-    var th: c_int = 0;
-    ws.tray.as(gtk.Widget).measure(.vertical, -1, &th_min, &th, null, null);
-    var tray: gtk.Allocation = .{ .f_x = 10, .f_y = height - th - 10, .f_width = @max(0, @min(nat, width - 20)), .f_height = th };
-    ws.tray.as(gtk.Widget).sizeAllocate(&tray, -1);
+    // Minimized panes' chips keep to the edges, each where it was put.
+    ws.placeChips(@floatFromInt(width), @floatFromInt(height));
+    var chips_moving = false;
+    for (ws.minimized.items) |m| {
+        allocateAt(m.button, .{ m.cur[0], m.cur[1], m.size[0], m.size[1] });
+        if (m.began != 0) chips_moving = true;
+    }
+    if (chips_moving) ws.startTick();
+    ws.snap = false;
     // Where the floating cards are decides what is cut from the tiled ones under them.
     if (cut_floating) widget.queueDraw();
 }
@@ -2139,6 +2535,31 @@ fn drawSwap(area: *gtk.DrawingArea, cr: *cairo.Context, w: c_int, h: c_int, _: ?
     cr.lineTo(cx - 14, cy + 5);
     cr.lineTo(cx - 8, cy + 11);
     cr.stroke();
+}
+
+/// How far along a change is at a share `p` of its time, on the curve CSS calls
+/// cubic-bezier(x1, y1, x2, y2).
+fn bezier(x1: f64, y1: f64, x2: f64, y2: f64, p: f64) f64 {
+    if (p <= 0) return 0;
+    if (p >= 1) return 1;
+    // The curve gives time and progress for a parameter t; t is found for this time.
+    var t = p;
+    for (0..8) |_| {
+        const u = 1 - t;
+        const x = 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t;
+        const slope = 3 * u * u * x1 + 6 * u * t * (x2 - x1) + 3 * t * t * (1 - x2);
+        if (@abs(slope) < 1e-6) break;
+        t = std.math.clamp(t - (x - p) / slope, 0, 1);
+    }
+    const u = 1 - t;
+    return 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t;
+}
+
+test "the chips' curve starts and ends where CSS's does, and is ahead of time in between" {
+    try std.testing.expectEqual(@as(f64, 0), bezier(0.2, 0.9, 0.3, 1, 0));
+    try std.testing.expectEqual(@as(f64, 1), bezier(0.2, 0.9, 0.3, 1, 1));
+    try std.testing.expect(bezier(0.2, 0.9, 0.3, 1, 0.25) > 0.7);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), bezier(0, 0, 1, 1, 0.5), 0.001);
 }
 
 /// A minimized pane's name, as its title row would show it, such as "zsh ~/Work/bundle".

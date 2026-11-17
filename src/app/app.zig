@@ -165,6 +165,7 @@ const css =
     \\.chip-face { box-shadow: none; }
     \\.tray-chip:hover { background-color: mix(@popover_bg_color, @window_fg_color, 0.1); box-shadow: 0 4px 16px alpha(black, 0.38); }
     \\.tray-chip:active { background-color: mix(@popover_bg_color, @window_fg_color, 0.16); }
+    \\.tray-chip.carried { background-color: mix(@popover_bg_color, @window_fg_color, 0.1); box-shadow: 0 0 0 1px @renux_stroke_subtle, 0 8px 22px alpha(black, 0.28); transition: background-color 150ms ease-out, box-shadow 170ms ease-out; }
     \\window.tight .content .workspace { margin: 0; }
     \\window.tight.no-headers .content.alone .workspace { margin-top: 38px; }
     \\window.tight:not(.tabs-above) .window-corner { min-height: 38px; }
@@ -227,7 +228,8 @@ const css =
     \\.hint-desc { font-size: 0.92em; }
     \\.mode-chip { background-color: @accent_bg_color; color: @accent_fg_color; font-weight: 700; font-size: 0.85em; border-radius: 99px; padding: 6px 16px; box-shadow: 0 4px 16px alpha(black, 0.35); }
     \\.connect-box { margin: 0 24px; }
-    \\.overview-name { font-size: 0.9em; font-weight: 600; color: @window_fg_color; text-shadow: 0 1px 4px alpha(black, 0.7); }
+    \\.overview-name { font-size: 0.9em; font-weight: 600; color: alpha(@window_fg_color, 0.55); text-shadow: 0 1px 4px alpha(black, 0.7); transition: color 140ms ease-out; }
+    \\.overview-name.chosen { color: @window_fg_color; }
     \\.overview-dots { background-color: alpha(black, 0.38); border-radius: 99px; padding: 4px 6px; }
     \\.overview-dot { min-width: 7px; min-height: 7px; border-radius: 99px; background-color: alpha(white, 0.32); }
     \\.overview-dot.working { background-color: #5aa9ff; }
@@ -4988,6 +4990,32 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
                     break;
                 }
             }
+            continue;
+        }
+        if (std.mem.eql(u8, cmd, "chip-drag")) {
+            // Carrying a minimized pane's chip without a mouse: `chip-drag 1 700 40` takes hold
+            // of the second chip by its middle and carries it to that point of the panes' area,
+            // `chip-drag move 300 500` carries it on, and `chip-drag drop` lets go.
+            const what = it.next() orelse continue;
+            if (std.mem.eql(u8, what, "report")) {
+                ws.chipReport();
+                continue;
+            }
+            if (std.mem.eql(u8, what, "drop")) {
+                ws.simulateChipDrop();
+                continue;
+            }
+            const moving = std.mem.eql(u8, what, "move");
+            const x = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
+            const y = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
+            if (moving) ws.simulateChipMove(x, y) else ws.simulateChipCarry(std.fmt.parseInt(usize, what, 10) catch continue, x, y);
+            continue;
+        }
+        if (std.mem.eql(u8, cmd, "overview-step")) {
+            // The overview's motion by hand, for a picture part-way through it: `overview-step
+            // 120` stops its clock and moves it on 120 ms, and `overview-step off` lets it run.
+            const by = it.next() orelse continue;
+            a.overview.hold(if (std.mem.eql(u8, by, "off")) null else std.fmt.parseFloat(f64, by) catch 0);
             continue;
         }
         if (std.mem.eql(u8, cmd, "overview-key")) {
