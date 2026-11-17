@@ -30,9 +30,11 @@ and please report them as [issues](https://github.com/zenodea/renux/issues).
   the cursor and fills in as they go. Local panes insert local paths. Screenshots become PNG
   files. Each file can be up to 100 MB.
 - **Peek at files.** Ctrl+click a file path to see the file by it, locally or remotely: the
-  lines around the one named, in syntax colors, or the picture. Enter opens the file in your
+  lines around the one named, in syntax colors, a picture, or a PDF. In a PDF, Right/Left
+  and Page Down/Page Up turn pages; the name row shows the current page and total.
+  Enter opens the file in your
   editor in a new pane to the right (`nvim` by default; the Editor command setting changes
-  it), and Shift+Enter in a new window. For a picture, Enter opens your image viewer. Hold
+  it), and Shift+Enter in a new window. For a picture or PDF, Enter opens your desktop viewer. Hold
   Ctrl to underline a detected path; Esc closes the peek. For paths with ambiguous spacing,
   select the path and choose **Preview Selected Path** from the right-click menu, which
   offers **Open With…** for other formats. **Quick Look** in the command palette lists the

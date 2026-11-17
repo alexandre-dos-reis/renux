@@ -1,4 +1,4 @@
-//! The first page of a PDF as a picture, drawn by Poppler. Not on a Mac, where Renux is only
+//! A page of a PDF as a picture, drawn by Poppler. Not on a Mac, where Renux is only
 //! built for development and Poppler isn't linked.
 const std = @import("std");
 const builtin = @import("builtin");
@@ -23,18 +23,24 @@ pub fn isPdf(data: []const u8) bool {
     return std.mem.startsWith(u8, data, "%PDF-");
 }
 
-pub const FirstPage = struct { texture: *gdk.Texture, pages: u32 };
+pub const RenderedPage = struct { texture: *gdk.Texture, pages: u32 };
 
-/// The first page on white, as large as fits in `max_w` by `max_h` pixels, and how many pages
+/// A zero-based page request, clamped at both ends. Unknown page counts stay on the first.
+pub fn nextPage(wanted: u32, pages: u32, forward: bool) u32 {
+    if (pages == 0) return 0;
+    return if (forward) @min(wanted +| 1, pages - 1) else wanted -| 1;
+}
+
+/// A page on white, as large as fits in `max_w` by `max_h` pixels, and how many pages
 /// there are. Null for a PDF that can't be read, such as one that wants a password. Slow
 /// enough to belong on a worker.
-pub fn firstPage(bytes: *glib.Bytes, max_w: f64, max_h: f64) ?FirstPage {
+pub fn renderPage(bytes: *glib.Bytes, index: u32, max_w: f64, max_h: f64) ?RenderedPage {
     if (!supported) return null;
     const doc = poppler_document_new_from_bytes(bytes, null, null) orelse return null;
     defer @as(*gobject.Object, @ptrCast(@alignCast(doc))).unref();
     const count = poppler_document_get_n_pages(doc);
-    if (count < 1) return null;
-    const page = poppler_document_get_page(doc, 0) orelse return null;
+    if (count < 1 or index >= count) return null;
+    const page = poppler_document_get_page(doc, @intCast(index)) orelse return null;
     defer @as(*gobject.Object, @ptrCast(@alignCast(page))).unref();
     var w: f64 = 0;
     var h: f64 = 0;
@@ -65,6 +71,17 @@ pub fn firstPage(bytes: *glib.Bytes, max_w: f64, max_h: f64) ?FirstPage {
     // Cairo's pixels are in this order on the processors Renux runs on.
     const texture = gdk.MemoryTexture.new(pw, ph, .b8g8r8a8_premultiplied, copy, stride);
     return .{ .texture = texture.as(gdk.Texture), .pages = @intCast(count) };
+}
+
+test "PDF page requests stop at the ends and retain only the latest target" {
+    try std.testing.expectEqual(@as(u32, 0), nextPage(0, 0, true));
+    try std.testing.expectEqual(@as(u32, 0), nextPage(0, 65, false));
+    var wanted: u32 = 0;
+    for (0..100) |_| wanted = nextPage(wanted, 65, true);
+    try std.testing.expectEqual(@as(u32, 64), wanted);
+    wanted = nextPage(wanted, 65, false);
+    try std.testing.expectEqual(@as(u32, 63), wanted);
+    try std.testing.expectEqual(@as(u32, 0), nextPage(0, 1, true));
 }
 
 test "a PDF is known by how it begins" {

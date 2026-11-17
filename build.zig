@@ -84,7 +84,7 @@ pub fn build(b: *std.Build) void {
     b.installDirectory(.{ .source_dir = b.path("data/shaders"), .install_dir = .prefix, .install_subdir = "share/renux/shaders", .include_extensions = &.{".glsl"} });
     // Fontconfig takes the bundled font on Linux.
     if (target.result.os.tag != .macos) mod.linkSystemLibrary("fontconfig", .{});
-    // Draws the first page of a PDF for the file peek.
+    // Draws PDF pages for the file peek.
     if (target.result.os.tag != .macos) mod.linkSystemLibrary("poppler-glib", .{});
 
     // On a Mac (only used for development) Zig's linker names a library once for every binding
