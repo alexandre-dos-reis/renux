@@ -27,7 +27,7 @@ pub fn enter(v: *tv.TermView) bool {
     if (v.copy_mode != null) return true;
     const live = v.term() orelse return false;
     v.copy_mode = Session.create(live) orelse {
-        v.server.notifyMessage("Couldn't enter copy mode while a terminal update was unfinished; try again");
+        v.server.notifyMessage("Couldn't take a copy-mode snapshot; try again");
         return true;
     };
     v.endCopyAnimation();
