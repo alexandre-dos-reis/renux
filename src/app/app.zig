@@ -303,6 +303,7 @@ pub const Host = struct {
     page: [:0]u8,
     /// Set for a host from $RENUX_SERVER, which isn't saved.
     temporary: bool = false,
+    muted_tabs: std.StringHashMapUnmanaged(void) = .empty,
 
     /// Its number among every host this run, which no later host shares.
     serial: usize = 0,
@@ -1403,6 +1404,9 @@ pub const App = struct {
             setSlot(&a.window_id, null);
             if (a.hosts.items.len > 0) a.selectHost(a.hosts.items[0]) else a.stack.setVisibleChildName("connect");
         }
+        var muted = h.muted_tabs.keyIterator();
+        while (muted.next()) |key| gpa.free(key.*);
+        h.muted_tabs.deinit(gpa);
         gpa.free(h.label);
         gpa.free(h.page);
         gpa.destroy(h);
@@ -1410,7 +1414,7 @@ pub const App = struct {
     }
 
     /// Shows a host's sessions in the content area.
-    fn selectHost(a: *App, h: *Host) void {
+    pub fn selectHost(a: *App, h: *Host) void {
         if (a.current == h) return;
         a.current = h;
         a.server = h.server;
@@ -1704,7 +1708,7 @@ pub const App = struct {
 
     /// Brings the sidebar, and with it the tabs, up to date before the next frame, however often
     /// it's asked: one change on a server asks several times over.
-    fn rebuildSidebar(a: *App) void {
+    pub fn rebuildSidebar(a: *App) void {
         a.sidebar_stale = true;
         // Rows of a host that was just removed can't wait: they point at it.
         for (a.rows.items) |r| if (r) |row| {
@@ -2393,6 +2397,7 @@ pub const App = struct {
         const st = &settings.current;
         if (!st.alerts) return;
         const s = h.server;
+        if (@import("small_actions.zig").muted(h, s.alert_block.items)) return;
         switch (s.alert_kind) {
             .blocked => if (!st.alert_blocked) return,
             .failed => if (!st.alert_error) return,
@@ -2678,11 +2683,11 @@ pub const App = struct {
     }
 
     /// The number of panes that need you, as a badge on the Dock or the desktop's launcher.
-    fn updateBadge(a: *App) void {
+    pub fn updateBadge(a: *App) void {
         var n: u32 = 0;
         if (settings.current.unread_badge) for (a.hosts.items) |h| {
-            var it = h.server.blocks.valueIterator();
-            while (it.next()) |b| if (b.attention) {
+            var it = h.server.blocks.iterator();
+            while (it.next()) |b| if (b.value_ptr.attention and !@import("small_actions.zig").muted(h, b.key_ptr.*)) {
                 n += 1;
             };
         };
@@ -3009,7 +3014,7 @@ pub const App = struct {
         if (is(action, "session.collapse")) return a.foldSessions(.current, true);
         if (is(action, "session.expand")) return a.foldSessions(.current, false);
         if (is(action, "session.collapse_others")) return a.foldSessions(.others, true);
-        return false;
+        return @import("small_actions.zig").perform(a, action);
     }
 
     pub fn toastText(a: *App, text: [:0]const u8) void {
@@ -3159,6 +3164,11 @@ pub const App = struct {
         }
         if (eql(u8, name, "go_to_directory")) return a.browse(.cd);
         if (eql(u8, name, "insert_path")) return a.browse(.insert);
+        if (eql(u8, name, "copy") or eql(u8, name, "paste")) {
+            const tv = (a.workspace orelse return false).focusedView() orelse return false;
+            if (eql(u8, name, "copy")) tv.copySelection(false) else tv.pasteClipboard();
+            return true;
+        }
         if (eql(u8, name, "select_all")) {
             const ws = a.workspace orelse return false;
             const tv = ws.focusedView() orelse return false;
@@ -3464,6 +3474,7 @@ pub const App = struct {
         dialog.addResponse("close", "Close Session");
         dialog.setResponseAppearance("close", .destructive);
         dialog.setDefaultResponse("cancel");
+        dialog.setCloseResponse("cancel");
         // The session and its host as they are now: another may be shown by the time it's answered.
         const ctx = a.renameCtxOn(host, sid, "", "") orelse return false;
         const Done = struct {

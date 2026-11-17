@@ -124,4 +124,5 @@ test {
     _ = @import("util/qr.zig");
     _ = @import("terminal/shader.zig");
     _ = @import("terminal/glide.zig");
+    _ = @import("app/small_actions.zig");
 }

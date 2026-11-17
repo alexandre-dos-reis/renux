@@ -31,6 +31,27 @@ const local = [_]struct { title: [:0]const u8, action: [:0]const u8, words: []co
     .{ .title = "Settings", .action = "app.settings", .words = "preferences font" },
 };
 
+const small_actions = [_]struct { title: []const u8, name: []const u8, category: []const u8 }{
+    .{ .title = "Quick Look", .name = "client.quick_look", .category = "Pane" },
+    .{ .title = "Mute or unmute tab", .name = "client.tab.mute", .category = "Tab" },
+    .{ .title = "Switch host", .name = "client.host.switch", .category = "Host" },
+    .{ .title = "Remove host…", .name = "client.host.remove", .category = "Host" },
+    .{ .title = "Refresh sessions", .name = "session.refresh", .category = "Session" },
+    .{ .title = "Copy pane ID", .name = "pane.copy_id", .category = "Pane" },
+    .{ .title = "Select all in pane", .name = "pane.select_all", .category = "Pane" },
+    .{ .title = "Copy from pane", .name = "pane.copy", .category = "Pane" },
+    .{ .title = "Paste into pane", .name = "pane.paste", .category = "Pane" },
+    .{ .title = "Close other panes", .name = "pane.close_others", .category = "Pane" },
+    .{ .title = "Rename pane", .name = "pane.rename", .category = "Pane" },
+    .{ .title = "New floating pane", .name = "pane.new_floating", .category = "Pane" },
+    .{ .title = "Minimize floating pane", .name = "pane.minimize_floating", .category = "Pane" },
+    .{ .title = "Minimize all floating panes", .name = "pane.minimize_all_floating", .category = "Pane" },
+    .{ .title = "Move pane to tab…", .name = "pane.move_to_tab", .category = "Pane" },
+    .{ .title = "Move pane to new tab", .name = "pane.move_to_new_tab", .category = "Pane" },
+    .{ .title = "Insert path…", .name = "pane.insert_path", .category = "Pane" },
+    .{ .title = "Go to directory…", .name = "pane.go_to_directory", .category = "Pane" },
+};
+
 fn switchedOff(action: []const u8) bool {
     const st = &settings.current;
     const eql = std.mem.eql;
@@ -95,6 +116,12 @@ pub const Palette = struct {
         // An action without a title is a call a program makes, such as reading a terminal's
         // screen, not a command for a person to run; those stay out of the list.
         for (server.actions) |a| if (!std.mem.eql(u8, a.title, a.name) and !switchedOff(a.name)) p.add(a.title, a.category, a.keys, a.keywords, a.name, true, null);
+        for (small_actions) |item| {
+            const listed = for (server.actions) |a| {
+                if (std.mem.eql(u8, a.name, item.name) and !std.mem.eql(u8, a.title, a.name)) break true;
+            } else false;
+            if (!listed) p.add(item.title, item.category, "", "", item.name, true, null);
+        }
         for (local, 0..) |l, i| if (!switchedOff(l.action)) p.add(l.title, "Renux", "", l.words, l.action, false, i);
 
         p.filter("");
@@ -180,10 +207,16 @@ pub const Palette = struct {
     fn runRex(p: *Palette, server: *Server, name: []const u8) void {
         const a = for (server.actions) |a| {
             if (std.mem.eql(u8, a.name, name)) break a;
-        } else return server.notifyMessage("That command is no longer in your Rex config");
+        } else {
+            for (small_actions) |item| if (std.mem.eql(u8, item.name, name)) {
+                if (!server.performLocal(p.session_id, name, null)) server.notifyMessage("Renux can't do that action yet");
+                return;
+            };
+            return server.notifyMessage("That command is no longer in your Rex config");
+        };
         if (a.needs_args and a.args == null) {
             server.notifyMessage("That command needs arguments; bind it to a key in your Rex config");
-        } else if (std.mem.startsWith(u8, a.name, "pane.") or std.mem.startsWith(u8, a.name, "client.")) {
+        } else if (std.mem.startsWith(u8, a.name, "pane.") or std.mem.startsWith(u8, a.name, "client.") or std.mem.startsWith(u8, a.name, "session.")) {
             if (!server.performLocal(p.session_id, a.name, a.args)) server.notifyMessage("Renux can't do that action yet");
         } else {
             server.runAction(p.session_id, p.block_id, a.name, a.args);

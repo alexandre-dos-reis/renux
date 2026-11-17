@@ -35,7 +35,9 @@ and please report them as [issues](https://github.com/zenodea/renux/issues).
   it), and Shift+Enter in a new window. For a picture, Enter opens your image viewer. Hold
   Ctrl to underline a detected path; Esc closes the peek. For paths with ambiguous spacing,
   select the path and choose **Preview Selected Path** from the right-click menu, which
-  offers **Open With…** for other formats. Requires Rex API 13; files up to 16 MiB.
+  offers **Open With…** for other formats. **Quick Look** in the command palette lists the
+  files and links on the focused pane's screen; choose a file to peek at it. Web links open
+  your browser. Requires Rex API 13; files up to 16 MiB.
 - **Several servers.** Connect to more than one Rex server, on this computer or over Tailscale,
   and be told when one could be updated. Remote hosts can answer to this computer's keys and
   keep their own colors.
@@ -95,6 +97,12 @@ foot of the sidebar.
 In the overview, the arrow keys or `h` `j` `k` `l` move between tabs, Enter goes to one and
 Escape goes back. `x` closes the tab the ring is on, `c` opens a new tab in its session and
 goes to it, and `s` groups the tabs by session.
+
+The command palette also offers **Mute or unmute tab**, **Switch host**, **Remove host…**,
+and **Refresh sessions**, plus clipboard and pane-management commands. Muting silences a
+tab's notifications, activity sounds and launcher badge for this run, without hiding its
+activity. Removing a host asks first and leaves its sessions running. See
+[the action audit](docs/action-coverage.md) for coverage and platform differences.
 
 A remote host answers to its own Rex config. For the same keys everywhere, turn on
 Settings > Remote Hosts > Use this computer's keys on remote hosts.

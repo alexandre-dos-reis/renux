@@ -766,9 +766,9 @@ pub const Server = struct {
             .err => return,
         };
         const items = json.array(payload, "sessions");
-        if (items.len == 0) return;
         s.clearSessions();
         for (items) |item| s.addSession(item);
+        s.dropViewsOfGoneSessions();
         s.notify(.sessions, null);
     }
 
@@ -805,6 +805,11 @@ pub const Server = struct {
     fn hasSession(s: *Server, id: []const u8) bool {
         for (s.sessions.items) |session| if (eql(session.id, id)) return true;
         return false;
+    }
+
+    pub fn refreshSessions(s: *Server) void {
+        s.call("session.list", no_args, void, {}, listed);
+        for (s.sessions.items) |session| s.refreshView(session.id, -1);
     }
 
     pub fn sessionView(s: *Server, id: []const u8) ?*view.SessionView {
@@ -1844,6 +1849,17 @@ fn freeKeys(map: anytype) void {
 
 fn eql(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+
+test "refreshing an empty session list clears stale sessions" {
+    var s: Server = .{ .url = &.{}, .client_label = &.{} };
+    defer s.sessions.deinit(gpa);
+    const parsed = try std.json.parseFromSlice(json.Value, std.testing.allocator, "{\"sessions\":[]}", .{});
+    defer parsed.deinit();
+    try s.sessions.append(gpa, .{ .id = try gpa.dupe(u8, "old"), .label = try gpa.dupe(u8, "gone") });
+    var unused: void = {};
+    Server.listed(&s, &unused, .{ .ok = parsed.value });
+    try std.testing.expectEqual(@as(usize, 0), s.sessions.items.len);
 }
 
 test "an action request leaves out what isn't set" {
