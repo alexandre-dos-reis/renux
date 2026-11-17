@@ -190,6 +190,7 @@ pub const Server = struct {
     pub fn destroy(s: *Server) void {
         @import("upload.zig").cancelForServer(s);
         @import("download.zig").cancelForServer(s);
+        @import("forward.zig").cancelForServer(s);
         if (std.mem.indexOfScalar(*const Server, live.items, s)) |i| _ = live.swapRemove(i);
         s.wanted = false;
         s.observer = null;

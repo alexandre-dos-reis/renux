@@ -1386,6 +1386,7 @@ pub const App = struct {
         a.board.hostRemoved();
         @import("../ui/palette.zig").serverGone(h.server);
         @import("../ui/goto.zig").hostRemoved(h.server);
+        @import("../ui/ports.zig").serverGone(h.server);
         // The workspace goes while its widget and the server are still there, since freeing it
         // releases its terminals; the widget leaves the stack after.
         // Calls still out fail as the server goes; none of them may reach the freed workspace.
@@ -2959,6 +2960,7 @@ pub const App = struct {
             a.filter_button.popup();
             return true;
         }
+        if (is(action, "client.host.forward_port")) return a.did(forwardPort);
         if (is(action, "client.host.add")) {
             a.addHostDialog();
             return true;
@@ -3590,6 +3592,7 @@ pub const App = struct {
             .{ "palette", openPalette, "" },
             .{ "settings", openSettings, "" },
             .{ "add-host", addHostDialog, "" },
+            .{ "forward-port", forwardPort, "" },
             .{ "pane-float-focused", floatPane, "" },
             .{ "find", openFind, "" },
             .{ "board", toggleBoard, "" },
@@ -3968,6 +3971,13 @@ pub const App = struct {
         const sid = a.session_id orelse return;
         const block = if (a.workspace) |ws| ws.focusedBlock() else null;
         Palette.open(s, a.app.as(gtk.Application), a.window.as(gtk.Widget), sid, block);
+    }
+
+    fn forwardPort(a: *App) void {
+        const s = a.server orelse return;
+        const sid = a.session_id orelse return;
+        const block = if (a.workspace) |ws| ws.focusedBlock() else null;
+        @import("../ui/ports.zig").show(a.window.as(gtk.Widget), s, sid, block);
     }
 
     // Settings.

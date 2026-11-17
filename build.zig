@@ -133,6 +133,11 @@ pub fn build(b: *std.Build) void {
     const preview_check = b.addSystemCommand(&.{ "python3", "scripts/test-uploads.py", "--preview" });
     preview_check.addArtifactArg(preview_tests);
     b.step("test-preview", "Test downloads and GTK previews against isolated Rex").dependOn(&preview_check.step);
+
+    const forward_tests = b.addTest(.{ .root_module = mod, .filters = &.{"forward integration"} });
+    const forward_check = b.addSystemCommand(&.{ "python3", "scripts/test-forwards.py" });
+    forward_check.addArtifactArg(forward_tests);
+    b.step("test-forward", "Test TCP forwards against isolated Rex (needs rex, curl and python3)").dependOn(&forward_check.step);
 }
 
 /// Clears what the binding modules link. The bindings import each other, so it tracks what it saw.

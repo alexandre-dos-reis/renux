@@ -24,6 +24,7 @@ const local = [_]struct { title: [:0]const u8, action: [:0]const u8, words: []co
     .{ .title = "Next prompt", .action = "app.prompt-next", .words = "jump shell command down" },
     .{ .title = "New window", .action = "app.new-window", .words = "tab" },
     .{ .title = "New session", .action = "app.new-session", .words = "" },
+    .{ .title = "Forward Port…", .action = "app.forward-port", .words = "client.host.forward_port localhost remote tunnel browser tcp" },
     .{ .title = "Toggle sidebar", .action = "app.toggle-sidebar", .words = "hide show" },
     .{ .title = "Overview", .action = "app.overview", .words = "all tabs windows zoom out grid expose mission" },
     .{ .title = "Full screen mode", .action = "app.full-screen", .words = "panes only hide sidebar background bare zen focus" },
