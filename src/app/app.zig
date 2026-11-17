@@ -90,6 +90,7 @@ const css =
     \\.peek-body { background-color: @view_bg_color; border-radius: 10px; }
     \\.peek-rows { padding: 8px 0; }
     \\.peek-row { padding: 2px 16px 2px 2px; }
+    \\.peek-row.peek-entry { padding-left: 18px; }
     \\.peek-row.peek-target { background-color: alpha(@accent_bg_color, 0.18); }
     \\.peek-message { padding: 0 18px; }
     \\.peek-path { font-family: monospace; font-size: 0.85em; color: @renux_secondary; padding: 0 18px; }
@@ -3068,6 +3069,8 @@ pub const App = struct {
             }
         }
         const fresh = adw.Toast.new(text.ptr);
+        // Ahead of a download's progress, which stays up for as long as the download takes.
+        fresh.setPriority(.high);
         a.toast_text.clearRetainingCapacity();
         a.toast_text.appendSlice(gpa, text) catch {};
         a.toast_count = 1;
@@ -5097,7 +5100,7 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
         } else if (std.mem.eql(u8, cmd, "drop")) {
             ws.simulateDrop();
         } else if (std.mem.eql(u8, cmd, "peek-key")) {
-            // A key in the file peek that is open: peek-key enter | shift-enter | escape
+            // A key in the file peek that is open: peek-key enter | shift-enter | escape | download
             @import("../ui/peek.zig").press(rest);
         } else if (std.mem.eql(u8, cmd, "open-link")) {
             // Ctrl+click on the link at a cell: open-link COL ROW

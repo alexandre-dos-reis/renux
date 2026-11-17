@@ -41,6 +41,30 @@
   One that can't be read, such as one that wants a password, offers
   **Open With…**. Not on a Mac, where Poppler isn't linked; the full preview dialog doesn't
   show PDFs either.
+- A path that names a folder shows the folder: Rex refuses to send it as a file, and the
+  peek then asks for its listing (`list_dir`, up to 400 entries) and shows folders first, then
+  files, each in name order, with a last line for how many more there are.
+- **Download** (`src/rex/fetch.zig`, `src/ui/fetch.zig`) brings a file or a folder from a
+  pane on another machine to the Downloads folder: Enter in a folder's peek, Ctrl+D or the
+  button in a file's. It has its own API-13 connection, lists folders with `list_dir` and
+  brings each file over a `download_begin` stream straight to disk, so there is no size
+  limit and nothing is held in memory. One file at a time: about half a second each over a
+  relayed Tailscale link (18 files in 10 s), far quicker on a direct one.
+  - Nothing on this computer is written over. The file or folder gets a free name
+    (`name (2).ext`), files are created with `O_EXCL`, and every name the host gives is
+    refused unless it is a single plain name (no `/`, `.` or `..`).
+  - Left out, and counted in the closing message: links to folders (they can lead back to
+    where the copy began), anything that isn't a regular file, files Rex can't read, and the
+    rest of a listing Rex cut short. A link to a file is copied as the file. Dead links
+    aren't listed by Rex at all. The executable bit isn't kept: Rex's listing doesn't
+    report permissions.
+  - Cancelling, or a failure part-way, removes the file that was arriving and keeps the
+    files that arrived whole. With nothing heard from the host for a minute it gives up.
+  - Progress is a toast that stays for as long as the download takes. The app's own
+    messages are now high priority, so they show ahead of it rather than waiting behind it.
+  - `zig build test-fetch` checks all of this against a disposable Rex server. In the hidden
+    rig the peek, real Ctrl+D and Enter, the progress and closing messages, and a real click
+    on Cancel were checked. **Show** (the desktop's files app) has not been tried.
 - Path detection supports absolute/relative paths, `~`, filename extensions, quoted spaces,
   soft wraps, and `path:line:column`, whose line the peek and the editor go to. Selection → **Preview Selected Path** is the fallback.
   Unquoted paths containing spaces remain ambiguous; extensionless bare names need selection.

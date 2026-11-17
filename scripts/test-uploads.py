@@ -21,6 +21,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--clipboard", action="store_true")
     parser.add_argument("--preview", action="store_true")
+    parser.add_argument("--fetch", action="store_true")
     parser.add_argument("test_binary")
     args = parser.parse_args()
     test_binary = str(Path(args.test_binary).resolve())
@@ -99,6 +100,8 @@ def main():
                     assert time.monotonic() < until, "Input recorder did not start"
                     time.sleep(0.02)
                 env.update(RENUX_UPLOAD_TEST_URL=url, RENUX_UPLOAD_TEST_SESSION=sid, RENUX_UPLOAD_TEST_BLOCK=bid)
+                if args.fetch:
+                    return check_fetch(root, env, test_binary)
                 regular = root / "screen shot ' <&> ü.bin"
                 data = bytes(range(256)) * (4 * 1024)  # 1 MiB, all byte values.
                 regular.write_bytes(data)
@@ -206,6 +209,69 @@ def main():
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait()
+
+
+def check_fetch(root, env, test_binary):
+    """Downloads of a folder and of a file land whole, under free names, and nowhere else."""
+    tree = root / "tree with ü"
+    (tree / "sub" / "deep").mkdir(parents=True)
+    (tree / "empty dir").mkdir()
+    (tree / "a.txt").write_text("a\n")
+    (tree / ".hidden").write_text("h")
+    (tree / "sub" / "data.bin").write_bytes(bytes(range(256)) * 4096)
+    (tree / "sub" / "empty.bin").touch()
+    big = tree / "sub" / "deep" / "big.bin"  # Over the preview's 16 MiB limit.
+    big.write_bytes(os.urandom(1024) * (17 * 1024))
+    (tree / "link-to-file").symlink_to(tree / "a.txt")
+    wanted = {str(p.relative_to(tree)): p.read_bytes() for p in tree.rglob("*") if p.is_file()}
+    # Left out: a link to a folder, what isn't a regular file, what can't be read, a dead link.
+    (tree / "link-to-dir").symlink_to(tree / "sub")
+    os.mkfifo(tree / "pipe")
+    (tree / "sub" / "locked").write_text("x")
+    (tree / "sub" / "locked").chmod(0)
+    (tree / "dangling").symlink_to("nowhere")
+    got = root / "got"
+    got.mkdir()
+
+    def run(mode, source):
+        test_env = dict(env, RENUX_FETCH_TEST_MODE=mode, RENUX_FETCH_TEST_FROM=str(source), RENUX_FETCH_TEST_INTO=str(got))
+        result = subprocess.run([test_binary], env=test_env, capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            raise AssertionError(f"{mode}:\n{result.stdout}\n{result.stderr}")
+        # The test runner writes its own progress on the same line.
+        return next(l[l.index("FETCH "):] for l in result.stderr.splitlines() if "FETCH " in l)
+
+    def files_in(folder):
+        return {str(p.relative_to(folder)): p.read_bytes() for p in folder.rglob("*") if p.is_file()}
+
+    def folders_in(folder):
+        return {str(p.relative_to(folder)) for p in folder.rglob("*") if p.is_dir()}
+
+    for mode, source, name in [("folder", tree, tree.name), ("relative", tree.name + "/", tree.name + " (2)")]:
+        line = run(mode, source)
+        assert f"done files={len(wanted)} " in line and "skipped=3 " in line, (mode, line)
+        assert line.endswith("to=" + str(got / name)), (mode, line)
+        assert files_in(got / name) == wanted, (mode, "Downloaded files differ")
+        assert folders_in(got / name) == {"sub", "sub/deep", "empty dir"}, (mode, folders_in(got / name))
+        assert not any(p.is_symlink() for p in (got / name).rglob("*")), (mode, "A link was made")
+        print(f"PASS fetch {mode}: {len(wanted)} files, 3 left out", flush=True)
+    for mode, name in [("file", "big.bin"), ("file-again", "big (2).bin")]:
+        line = run(mode, big)
+        assert "done files=1 " in line and line.endswith("to=" + str(got / name)), (mode, line)
+        assert (got / name).read_bytes() == big.read_bytes(), (mode, "Downloaded file differs")
+        print(f"PASS fetch {mode}: {name}", flush=True)
+    before = sorted(str(p) for p in got.rglob("*"))
+    for mode, source in [("missing", root / "missing"), ("host-removed", tree)]:
+        line = run(mode, source)
+        assert sorted(str(p) for p in got.rglob("*")) == before, (mode, "Something was made")
+        print(f"PASS fetch {mode}: {line.split()[1]}, nothing made", flush=True)
+    line = run("cancel", tree)
+    partial = got / (tree.name + " (3)")
+    assert "cancelled" in line and line.endswith("to=" + str(partial)), line
+    arrived = files_in(partial)
+    assert 2 <= len(arrived) < len(wanted), ("cancel", len(arrived))
+    assert all(wanted[name] == data for name, data in arrived.items()), "A cancelled download left half a file"
+    print(f"PASS fetch cancel: {len(arrived)} whole files kept, no half file", flush=True)
 
 
 if __name__ == "__main__":

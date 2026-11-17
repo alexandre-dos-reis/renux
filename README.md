@@ -45,6 +45,13 @@ and please report them as [issues](https://github.com/zenodea/renux/issues).
   offers **Open With…** for other formats. **Quick Look** in the command palette lists the
   files and links on the focused pane's screen; choose a file to peek at it. Web links open
   your browser. Requires Rex API 13; files up to 16 MiB.
+- **Download from a remote pane.** Ctrl+click a folder's path to see what is in it; Enter
+  copies the whole folder to this computer's Downloads folder. In a file's peek, Ctrl+D (or
+  the **Download** button) does the same for the file, whatever its size. A message at the
+  foot of the window shows how far it has got, with **Cancel**, and then **Show** to find it
+  in your files app. Nothing is written over: a name that is taken gets a number, as in
+  `notes (2).md`. Links to folders and files that can't be read are left out and counted.
+  For a folder on this computer, Enter opens it in your files app.
 - **Remote development links.** Ctrl+click an HTTP(S) localhost link with a port in a remote
   pane: Renux forwards it to a free port on this computer and opens the same path and query in
   your browser. Repeated clicks reuse the forward. **Forward Port…** in Commands discovers
@@ -172,6 +179,7 @@ test script and the frame log.
 `zig build test-clipboard` also exercises the GTK paste handler on a private display, including
 images and Ctrl+V; it additionally needs `gtk4-broadwayd` and never changes your clipboard.
 `zig build test-preview` uses the same isolated setup to check downloads and preview dialogs.
+`zig build test-fetch` downloads a folder and a large file from it and compares every byte.
 `zig build test-forward` checks TCP forwarding, URL rewriting, reuse and cleanup against a
 private Rex server and HTTP target. It needs `rex`, `curl` and Python 3, but no display.
 

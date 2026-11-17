@@ -134,6 +134,11 @@ pub fn build(b: *std.Build) void {
     preview_check.addArtifactArg(preview_tests);
     b.step("test-preview", "Test downloads and GTK previews against isolated Rex").dependOn(&preview_check.step);
 
+    const fetch_tests = b.addTest(.{ .root_module = mod, .filters = &.{"fetch integration"} });
+    const fetch_check = b.addSystemCommand(&.{ "python3", "scripts/test-uploads.py", "--fetch" });
+    fetch_check.addArtifactArg(fetch_tests);
+    b.step("test-fetch", "Test file and folder downloads against isolated Rex").dependOn(&fetch_check.step);
+
     const forward_tests = b.addTest(.{ .root_module = mod, .filters = &.{"forward integration"} });
     const forward_check = b.addSystemCommand(&.{ "python3", "scripts/test-forwards.py" });
     forward_check.addArtifactArg(forward_tests);

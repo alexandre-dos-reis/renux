@@ -1,7 +1,8 @@
 //! A small look at a file named in a pane, shown by its path: what the file is, the lines
 //! around the one named, a picture, or a PDF's pages. Enter opens the file in an editor
 //! in a new pane to the right, and Shift+Enter in a new window. A picture or a PDF goes to
-//! the desktop's own viewer.
+//! the desktop's own viewer. A folder shows what is in it. Ctrl+D brings a file or a folder
+//! on another machine to this computer's Downloads folder.
 const std = @import("std");
 const gtk = @import("gtk");
 const adw = @import("adw");
@@ -11,6 +12,7 @@ const gdk = @import("gdk");
 const gobject = @import("gobject");
 const cairo = @import("cairo");
 const download = @import("../rex/download.zig");
+const fetch = @import("fetch.zig");
 const preview = @import("preview.zig");
 const pdf = @import("pdf.zig");
 const highlight = @import("highlight.zig");
@@ -65,6 +67,7 @@ pub fn visible() ?*gtk.Widget {
 pub fn press(key: []const u8) void {
     const p = open orelse return;
     if (std.mem.eql(u8, key, "escape")) return p.dismiss();
+    if (std.mem.eql(u8, key, "download")) return p.save();
     if (std.mem.eql(u8, key, "right") or std.mem.eql(u8, key, "page-down")) {
         _ = p.turnPage(true);
     } else if (std.mem.eql(u8, key, "left") or std.mem.eql(u8, key, "page-up")) {
@@ -79,7 +82,7 @@ pub fn split(target: []const u8) struct { path: []const u8, line: ?u32 } {
     return .{ .path = target[0..colon], .line = if (line == 0) null else line };
 }
 
-const Kind = enum { loading, text, image, pdf, other, failed };
+const Kind = enum { loading, text, image, pdf, folder, other, failed };
 /// Where the editor goes: a new pane to the right of this one, or a new window.
 const How = enum { beside, window };
 
@@ -99,11 +102,18 @@ const Peek = struct {
     shown: ?*gtk.Widget = null,
     /// The path under "Loading from", while that is what the peek shows.
     where: ?*gtk.Label = null,
+    icon: *gtk.DrawingArea,
     meta: *gtk.Label,
     primary: *gtk.Button,
     primary_label: *gtk.Label,
     second: *gtk.Button,
+    /// Brings the file to this computer, when it is on another.
+    bring: *gtk.Button,
     transfer: ?*download.Download = null,
+    /// What Rex said when the path turned out not to be a file it could read, kept while the
+    /// peek asks whether it is a folder.
+    refused: ?[]u8 = null,
+    listing: bool = false,
     data: ?*glib.Bytes = null,
     texture: ?*gdk.Texture = null,
     /// PDF indices are zero-based; only the latest requested page waits for the worker.
@@ -144,7 +154,8 @@ const Peek = struct {
 
         const head = gtk.Box.new(.horizontal, 9);
         head.as(gtk.Widget).addCssClass("peek-head");
-        head.append(fileIcon(path));
+        const icon = fileIcon(path);
+        head.append(icon.as(gtk.Widget));
         const base = if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| path[slash + 1 ..] else path;
         const name = label(base, "heading");
         name.setEllipsize(.middle);
@@ -177,6 +188,10 @@ const Peek = struct {
         actions.append(primary.as(gtk.Widget));
         const second = keyButton(gtk.Label.new("New Window"), "Shift Enter");
         actions.append(second.as(gtk.Widget));
+        const bring = keyButton(gtk.Label.new("Download"), "Ctrl D");
+        bring.as(gtk.Widget).setHexpand(1);
+        bring.as(gtk.Widget).setHalign(.end);
+        actions.append(bring.as(gtk.Widget));
         box.append(actions.as(gtk.Widget));
 
         const pop = gtk.Popover.new();
@@ -193,10 +208,11 @@ const Peek = struct {
         // Ours to keep until the popover has been taken off its parent.
         _ = pop.as(gobject.Object).ref();
 
-        p.* = .{ .pop = pop, .parent = parent, .server = server, .sid = own_sid, .bid = own_bid, .path = own_path, .line = line, .body = body, .meta = meta, .primary = primary, .primary_label = primary_label, .second = second };
+        p.* = .{ .pop = pop, .parent = parent, .server = server, .sid = own_sid, .bid = own_bid, .path = own_path, .line = line, .body = body, .icon = icon, .meta = meta, .primary = primary, .primary_label = primary_label, .second = second, .bring = bring };
         _ = gtk.Popover.signals.closed.connect(pop, *Peek, &closed, p, .{});
         _ = gtk.Button.signals.clicked.connect(primary, *Peek, &clickedBeside, p, .{});
         _ = gtk.Button.signals.clicked.connect(second, *Peek, &clickedWindow, p, .{});
+        _ = gtk.Button.signals.clicked.connect(bring, *Peek, &clickedBring, p, .{});
         // The keys are the peek's before a focused button gets them.
         const keys = gtk.EventControllerKey.new();
         keys.as(gtk.EventController).setPropagationPhase(.capture);
@@ -213,6 +229,7 @@ const Peek = struct {
         if (p.data) |b| b.unref();
         if (p.texture) |t| t.as(gobject.Object).unref();
         if (p.resolved) |r| gpa.free(r);
+        if (p.refused) |r| gpa.free(r);
         gpa.free(p.sid);
         gpa.free(p.bid);
         gpa.free(p.path);
@@ -354,7 +371,7 @@ const Peek = struct {
     fn edits(p: *const Peek) bool {
         return switch (p.kind) {
             .text => true,
-            .image, .pdf, .other => false,
+            .image, .pdf, .folder, .other => false,
             .loading => !looksLikeImage(p.path) and !looksLikePdf(p.path),
             // Too big to show here is still a file an editor can open.
             .failed => p.resolved != null,
@@ -371,15 +388,23 @@ const Peek = struct {
         };
     }
 
+    /// Whether there is something on another machine to bring to this computer.
+    fn brings(p: *const Peek) bool {
+        return !p.onThisComputer() and !(p.kind == .failed and p.resolved == null);
+    }
+
     /// The buttons say what the keys do for this file.
     fn refresh(p: *Peek) void {
         const missing = p.kind == .failed and p.resolved == null;
         const editing = p.edits();
+        const folder = p.kind == .folder;
         var buf: [96]u8 = undefined;
-        const text: [:0]const u8 = if (editing) std.fmt.bufPrintSentinel(&buf, "Open in {s}", .{editorName()}, 0) catch "Open in Editor" else if (p.viewed()) "Open" else "Open With…";
+        // A folder on another machine has one thing to be done with it, so Enter does it.
+        const text: [:0]const u8 = if (folder) (if (p.onThisComputer()) "Open" else "Download") else if (editing) std.fmt.bufPrintSentinel(&buf, "Open in {s}", .{editorName()}, 0) catch "Open in Editor" else if (p.viewed()) "Open" else "Open With…";
         p.primary_label.setText(text.ptr);
         p.primary.as(gtk.Widget).setSensitive(@intFromBool(!missing));
         offer(p.second, editing);
+        offer(p.bring, p.brings() and !folder);
     }
 
     fn located(ctx: *anyopaque, path: []const u8) void {
@@ -406,8 +431,12 @@ const Peek = struct {
         const p: *Peek = @ptrCast(@alignCast(ctx));
         p.transfer = null;
         if (p.gone) return;
+        // What Rex never found may be a folder, which it doesn't send.
+        const data = bytes orelse {
+            if (p.resolved == null) p.askFolder(detail) else p.fail(detail);
+            return p.resumeLater();
+        };
         p.resumeLater();
-        const data = bytes orelse return p.fail(detail);
         var buf: [32]u8 = undefined;
         p.meta.setText(sizeText(&buf, data.len).ptr);
         // Kept for the worker that draws a picture, and for the copy another app is given.
@@ -522,6 +551,76 @@ const Peek = struct {
         p.present();
     }
 
+    fn askFolder(p: *Peek, detail: []const u8) void {
+        p.refused = gpa.dupe(u8, detail) catch null;
+        p.listing = true;
+        p.refs += 1;
+        p.server.listDir(p.sid, p.bid, p.path, true, .{ .ctx = p, .done = listed });
+    }
+
+    fn listed(ctx: *anyopaque, path: []const u8, names: []const []const u8, files: []const bool, readable: bool) void {
+        const p: *Peek = @ptrCast(@alignCast(ctx));
+        defer p.unref();
+        p.listing = false;
+        if (p.gone) return;
+        defer p.resumeLater();
+        if (!readable) return p.fail(p.refused orelse "Can't read this file: check the path and permissions");
+        p.resolved = gpa.dupe(u8, path) catch null;
+        p.kind = .folder;
+        p.icon.setDrawFunc(&drawFolder, null, null);
+        p.icon.as(gtk.Widget).queueDraw();
+        var buf: [32]u8 = undefined;
+        // A listing as long as Rex was asked for may not be all of it.
+        const more = if (names.len >= Server.dir_limit) "+" else "";
+        const count: [:0]const u8 = std.fmt.bufPrintSentinel(&buf, "{d}{s} {s}", .{ names.len, more, if (names.len == 1) "item" else "items" }, 0) catch "";
+        p.meta.setText(count.ptr);
+        p.showFolder(names, files, more);
+        p.refresh();
+        p.present();
+    }
+
+    /// What is in a folder: its folders, then its files, each in name order.
+    fn showFolder(p: *Peek, names: []const []const u8, files: []const bool, more: []const u8) void {
+        if (names.len == 0) return p.setBody(message("Empty folder"));
+        const Entry = struct { name: []const u8, file: bool };
+        const entries = gpa.alloc(Entry, names.len) catch return p.setBody(message("Not enough memory to show this folder"));
+        defer gpa.free(entries);
+        for (entries, names, files) |*e, name, file| e.* = .{ .name = name, .file = file };
+        std.mem.sort(Entry, entries, {}, struct {
+            fn less(_: void, x: Entry, y: Entry) bool {
+                if (x.file != y.file) return !x.file;
+                return std.ascii.lessThanIgnoreCase(x.name, y.name);
+            }
+        }.less);
+        const rows = gtk.Box.new(.vertical, 0);
+        // The last line says how many there was no room for.
+        const room = if (entries.len > shown_lines) shown_lines - 1 else entries.len;
+        for (entries[0..room]) |e| {
+            const row = gtk.Box.new(.horizontal, 10);
+            row.as(gtk.Widget).addCssClass("peek-row");
+            row.as(gtk.Widget).addCssClass("peek-entry");
+            const image = gtk.Image.newFromIconName(if (e.file) "text-x-generic-symbolic" else "folder-symbolic");
+            image.setPixelSize(14);
+            image.as(gtk.Widget).addCssClass("dim-label");
+            row.append(image.as(gtk.Widget));
+            const name = label(e.name, "monospace");
+            name.setEllipsize(.middle);
+            name.as(gtk.Widget).setHexpand(1);
+            row.append(name.as(gtk.Widget));
+            rows.append(row.as(gtk.Widget));
+        }
+        if (entries.len > room) {
+            var buf: [48]u8 = undefined;
+            const rest = label(std.fmt.bufPrint(&buf, "and {d}{s} more", .{ entries.len - room, more }) catch "", "dim-label");
+            rest.as(gtk.Widget).addCssClass("peek-row");
+            rest.as(gtk.Widget).addCssClass("peek-entry");
+            rows.append(rest.as(gtk.Widget));
+        }
+        rows.as(gtk.Widget).addCssClass("peek-rows");
+        rows.as(gtk.Widget).setValign(.start);
+        p.setBody(rows.as(gtk.Widget));
+    }
+
     fn fail(p: *Peek, detail: []const u8) void {
         p.kind = .failed;
         if (gpa.dupeSentinel(u8, detail, 0)) |text| {
@@ -623,6 +722,11 @@ const Peek = struct {
     fn onKey(_: *gtk.EventControllerKey, keyval: c_uint, _: c_uint, state: gdk.ModifierType, p: *Peek) callconv(.c) c_int {
         const bits: u32 = @bitCast(state);
         const shift = bits & 1 != 0;
+        const ctrl = bits & 4 != 0;
+        if (ctrl and (keyval == gdk.KEY_d or keyval == gdk.KEY_D)) {
+            p.save();
+            return 1;
+        }
         switch (keyval) {
             0xff0d, 0xff8d, 0xfe34 => p.run(if (shift) .window else .beside),
             0xff1b => p.dismiss(),
@@ -639,10 +743,21 @@ const Peek = struct {
     fn clickedWindow(_: *gtk.Button, p: *Peek) callconv(.c) void {
         p.run(.window);
     }
+    fn clickedBring(_: *gtk.Button, p: *Peek) callconv(.c) void {
+        p.save();
+    }
+
+    /// Starts bringing the file or folder to this computer's Downloads folder, and closes.
+    fn save(p: *Peek) void {
+        if (p.gone or !p.server.isLive() or !p.brings()) return;
+        fetch.start(p.parent, p.server, p.sid, p.bid, p.resolved orelse p.path);
+        p.dismiss();
+    }
 
     fn run(p: *Peek, how: How) void {
         if (p.gone or !p.server.isLive()) return;
         if (p.kind == .failed and p.resolved == null) return;
+        if (p.kind == .folder and !p.onThisComputer()) return p.save();
         const editing = p.edits();
         // A key pressed before what it needs has arrived is kept, and acted on when it has.
         if (!p.ready(editing)) {
@@ -665,6 +780,8 @@ const Peek = struct {
     /// names nothing; Rex says where the file is a moment after the download begins. An app
     /// on this computer needs the file itself, or all of a copy of it.
     fn ready(p: *const Peek, editing: bool) bool {
+        // Not until it is known whether this is a folder.
+        if (p.listing) return false;
         if (p.transfer == null) return true;
         if (editing) return p.resolved != null or p.path[0] == '/' or p.path[0] == '~';
         return p.resolved != null and p.onThisComputer();
@@ -689,7 +806,8 @@ const Peek = struct {
         defer file.unref();
         const launcher = gtk.FileLauncher.new(file);
         defer launcher.unref();
-        launcher.setAlwaysAsk(@intFromBool(!p.viewed()));
+        // A folder goes to the desktop's files app.
+        launcher.setAlwaysAsk(@intFromBool(!p.viewed() and p.kind != .folder));
         const window: ?*gtk.Window = if (p.parent.getRoot()) |root| @ptrCast(@alignCast(root)) else null;
         launcher.launch(window, null, null, null);
     }
@@ -785,7 +903,7 @@ fn keyButton(text: *gtk.Label, key: [:0]const u8) *gtk.Button {
 }
 
 /// The logo of the language a file is written in, by its name, or a plain page.
-fn fileIcon(path: []const u8) *gtk.Widget {
+fn fileIcon(path: []const u8) *gtk.DrawingArea {
     const area = gtk.DrawingArea.new();
     area.setContentWidth(18);
     area.setContentHeight(18);
@@ -793,7 +911,7 @@ fn fileIcon(path: []const u8) *gtk.Widget {
     const found = if (kindOf(path)) |k| if (k.icon.len > 0) programs.iconFor(null, k.icon) else null else null;
     const icon: ?*anyopaque = if (found) |i| @ptrCast(@constCast(i)) else null;
     area.setDrawFunc(&drawIcon, icon, null);
-    return area.as(gtk.Widget);
+    return area;
 }
 
 /// What a file's name says it is: the icon that stands for it, by the icon's own name, and
@@ -889,6 +1007,23 @@ fn drawIcon(area: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, _: c_int, 
     cr.stroke();
 }
 
+/// A folder, in the same line as the page.
+fn drawFolder(area: *gtk.DrawingArea, cr: *cairo.Context, width: c_int, _: c_int, _: ?*anyopaque) callconv(.c) void {
+    var ink: gdk.RGBA = undefined;
+    area.as(gtk.Widget).getColor(&ink);
+    const size: f64 = @floatFromInt(width);
+    cr.setSourceRgba(ink.f_red, ink.f_green, ink.f_blue, 0.75);
+    cr.setLineWidth(1.4);
+    cr.moveTo(size * 0.1, size * 0.2);
+    cr.lineTo(size * 0.4, size * 0.2);
+    cr.lineTo(size * 0.5, size * 0.34);
+    cr.lineTo(size * 0.9, size * 0.34);
+    cr.lineTo(size * 0.9, size * 0.82);
+    cr.lineTo(size * 0.1, size * 0.82);
+    cr.closePath();
+    cr.stroke();
+}
+
 fn looksLikeImage(path: []const u8) bool {
     const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse return false;
     for ([_][]const u8{ "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tif", "tiff", "avif", "heic" }) |ext| {
@@ -954,15 +1089,7 @@ fn clip(text: []const u8, max: usize) []const u8 {
     return text[0..end];
 }
 
-fn sizeText(buf: []u8, bytes: usize) [:0]const u8 {
-    const n: f64 = @floatFromInt(bytes);
-    return (if (bytes < 1024)
-        std.fmt.bufPrintSentinel(buf, "{d} B", .{bytes}, 0)
-    else if (bytes < 1024 * 1024)
-        std.fmt.bufPrintSentinel(buf, "{d:.1} KB", .{n / 1024}, 0)
-    else
-        std.fmt.bufPrintSentinel(buf, "{d:.1} MB", .{n / (1024 * 1024)}, 0)) catch "";
-}
+const sizeText = fetch.sizeText;
 
 /// A path as a shell takes it as one word, in quotes only when it has a character a shell
 /// would read as something else. A leading `~/` stays outside the quotes, where the shell

@@ -190,6 +190,7 @@ pub const Server = struct {
     pub fn destroy(s: *Server) void {
         @import("upload.zig").cancelForServer(s);
         @import("download.zig").cancelForServer(s);
+        @import("fetch.zig").cancelForServer(s);
         @import("forward.zig").cancelForServer(s);
         if (std.mem.indexOfScalar(*const Server, live.items, s)) |i| _ = live.swapRemove(i);
         s.wanted = false;
@@ -1294,14 +1295,17 @@ pub const Server = struct {
         }, runningWindowMade);
     }
 
-    /// Folders (and files, if asked) in a directory as the terminal's shell sees it.
+    /// Folders (and files, if asked) in a directory as the terminal's shell sees it. `readable`
+    /// is whether there is a folder there that Rex could read.
     pub const DirList = struct {
         ctx: *anyopaque,
-        done: *const fn (ctx: *anyopaque, path: []const u8, names: []const []const u8, files: []const bool) void,
+        done: *const fn (ctx: *anyopaque, path: []const u8, names: []const []const u8, files: []const bool, readable: bool) void,
     };
+    /// The most entries a listing brings.
+    pub const dir_limit = 400;
 
     pub fn listDir(s: *Server, session_id: []const u8, block_id: []const u8, path: []const u8, with_files: bool, cb: DirList) void {
-        s.call("com.superlogical.terminal.list_dir", .{ .session_id = session_id, .block_id = block_id, .args = .{ .path = path, .files = with_files, .limit = 400 } }, DirList, cb, gotDir);
+        s.call("com.superlogical.terminal.list_dir", .{ .session_id = session_id, .block_id = block_id, .args = .{ .path = path, .files = with_files, .limit = dir_limit } }, DirList, cb, gotDir);
     }
 
     fn gotDir(_: *Server, cb: *DirList, r: Result) void {
@@ -1316,9 +1320,9 @@ pub const Server = struct {
                     names.append(gpa, name) catch break;
                     files.append(gpa, json.boolean(e, "file") orelse false) catch break;
                 }
-                cb.done(cb.ctx, json.str(payload, "path") orelse "", names.items, files.items);
+                cb.done(cb.ctx, json.str(payload, "path") orelse "", names.items, files.items, std.mem.eql(u8, json.str(payload, "status") orelse "", "ok"));
             },
-            .err => cb.done(cb.ctx, "", &.{}, &.{}),
+            .err => cb.done(cb.ctx, "", &.{}, &.{}, false),
         }
     }
 

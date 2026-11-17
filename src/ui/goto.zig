@@ -281,7 +281,7 @@ const Browser = struct {
         b.server.listDir(b.session_id, b.block_id, path, b.mode == .insert, .{ .ctx = b, .done = listed });
     }
 
-    fn listed(ctx: *anyopaque, path: []const u8, names: []const []const u8, files: []const bool) void {
+    fn listed(ctx: *anyopaque, path: []const u8, names: []const []const u8, files: []const bool, _: bool) void {
         const b: *Browser = @ptrCast(@alignCast(ctx));
         b.waiting -|= 1;
         if (b.closed) {

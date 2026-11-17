@@ -84,6 +84,7 @@ pub fn main(init: std.process.Init) !void {
     const app = try App.create();
     const code = app.run();
     @import("rex/forward.zig").shutdown();
+    @import("rex/fetch.zig").shutdown();
     // A setting changed in the last second is still waiting to be written.
     @import("settings/settings.zig").flush();
     releaseToggle();
@@ -104,12 +105,14 @@ test {
     _ = @import("rex/updates.zig");
     _ = @import("rex/upload.zig");
     _ = @import("rex/download.zig");
+    _ = @import("rex/fetch.zig");
     _ = @import("rex/forward.zig");
     _ = @import("ui/ports.zig");
     _ = @import("terminal/paths.zig");
     _ = @import("ui/preview.zig");
     _ = @import("ui/peek.zig");
     _ = @import("ui/pdf.zig");
+    _ = @import("ui/fetch.zig");
     _ = @import("ui/highlight.zig");
     _ = @import("terminal/keys.zig");
     _ = @import("terminal/termview.zig");
