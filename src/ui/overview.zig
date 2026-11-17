@@ -10,6 +10,13 @@
 //! frame, and take over from the pictures. The zoom in moves pictures too: text drawn at a
 //! new size every frame has every glyph made again each time, which is slow.
 //!
+//! The zoom runs on a spring, so it settles a touch past the grid and comes back, and a key
+//! pressed part-way turns it around from where it is. The tabs around the one zoomed out of
+//! land after it, the farthest last. The ring slides from tab to tab on a quicker spring of
+//! its own, and gives a little when a key has nowhere to send it. Names, dots, ring and foot
+//! come in over the second half of the zoom, and a preview fades in over the card or picture
+//! that stood for it.
+//!
 //! A tab with agents in it carries a small dot for each in its top right corner, in the color
 //! of what that agent is doing, so the grid can be watched in place of the panes.
 const std = @import("std");
@@ -36,7 +43,24 @@ const name_room: f64 = 30;
 const bottom_room: f64 = 64;
 /// Room under a tab for its name inside a session's group, where there is less to spare.
 const group_name_room: f64 = 26;
-const zoom_ms: f64 = 300;
+/// The zoom's spring: how stiff it is, and how damped. At 1 it would never pass where it is
+/// going; a little under, it settles a touch past the grid and comes back.
+const zoom_stiffness: f64 = 210;
+const zoom_damping: f64 = 0.8;
+/// The ring's spring, quicker, and the push a key with no tab in its direction gives the
+/// ring, in pixels a second.
+const ring_stiffness: f64 = 1100;
+const ring_damping: f64 = 0.86;
+const ring_nudge: f64 = 420;
+/// How long a preview takes to fade in over the card or picture in its place.
+const fade_ms: f64 = 200;
+/// The tabs around the one zoomed out of land after it: the share of the zoom the farthest
+/// waits before it starts, and the size they land from.
+const land_wait: f64 = 0.3;
+const land_from: f64 = 0.88;
+/// How far the names and the foot rise into place as the grid appears.
+const name_rise: f64 = 6;
+const foot_rise: f64 = 16;
 /// How far the ring stands off the tab it is around.
 const ring_gap: f64 = 4;
 /// The most pictures of tabs kept between one opening of the overview and the next.
@@ -78,6 +102,8 @@ const Tile = struct {
     shot: ?*gtk.WidgetPaintable = null,
     /// Whether the preview has been given its place and size, and so can be drawn.
     placed: bool = false,
+    /// How far the preview has faded in over what stood for it, 0 to 1.
+    live: f64 = 0,
     /// Its place in the grid, and where it is drawn now: on its way there after the grid has
     /// changed, growing in when it is new, shrinking away when its tab has closed.
     rect: [4]f64 = .{ 0, 0, 0, 0 },
@@ -146,13 +172,22 @@ pub const Overview = struct {
     selected: usize = 0,
     focus: usize = 0,
     /// How far out the view is: 0 with the focus tab filling the window, 1 at the whole grid.
+    /// It is on its way to `to` at speed `vel`, and passes 1 a little before it settles.
     zoom: f64 = 1,
-    from: f64 = 1,
     to: f64 = 1,
-    started: i64 = 0,
+    vel: f64 = 0,
     /// The zoom is running. The tick goes on after it, while previews are still to be made.
     animating: bool = false,
     tick: c_uint = 0,
+    /// The ring on its way to the tab it is on: how far off its place it is and how fast it
+    /// moves, where it was last drawn, and whether it is to start from there, set when the
+    /// tab it is on changes.
+    ring_off: [2]f64 = .{ 0, 0 },
+    ring_vel: [2]f64 = .{ 0, 0 },
+    ring_at: [2]f64 = .{ 0, 0 },
+    ring_moved: bool = false,
+    /// Development: the clock is stopped, and moved on by hand; see `hold`.
+    held: bool = false,
     size: [2]f64 = .{ 0, 0 },
     /// The part of a tab's place its panes cover, as shares of that place: all of it but the
     /// margins the panes have in the window.
@@ -210,7 +245,13 @@ pub const Overview = struct {
     }
 
     pub fn toggle(o: *Overview) void {
-        if (o.open) o.close() else o.show();
+        if (!o.open) return o.show();
+        // Asked for again on its way into a tab, it turns around and comes back out.
+        if (o.animating and o.to == 0) {
+            o.to = 1;
+            return;
+        }
+        o.close();
     }
 
     /// Opens the overview, zooming out from the tab on screen.
@@ -250,14 +291,17 @@ pub const Overview = struct {
         o.settled = true;
         o.gliding = false;
         o.zoom = 1;
+        o.to = 1;
+        o.vel = 0;
         o.animating = false;
+        o.ring_off = .{ 0, 0 };
+        o.ring_vel = .{ 0, 0 };
+        o.ring_moved = false;
+        o.markChosen();
         if (sharp) |p| {
             if (here) |i| {
                 o.tiles.items[i].sharp = p;
                 o.zoom = 0;
-                o.from = 0;
-                o.to = 1;
-                o.started = 0;
                 o.animating = true;
             } else p.unref();
         }
@@ -295,16 +339,19 @@ pub const Overview = struct {
     fn zoomInto(o: *Overview, index: usize) void {
         o.selected = index;
         o.focus = index;
-        o.from = o.zoom;
+        // The zoom keeps the speed it has, so one turned around part-way doesn't stop first.
         o.to = 0;
-        o.started = 0;
         o.animating = true;
         o.gliding = false;
         o.go_after = null;
+        o.ring_off = .{ 0, 0 };
+        o.ring_vel = .{ 0, 0 };
+        o.ring_moved = false;
         for (o.tiles.items) |*t| {
             t.cur = t.rect;
             t.alpha = 1;
         }
+        o.markChosen();
         o.takePictures(true);
         o.startTick();
     }
@@ -314,6 +361,7 @@ pub const Overview = struct {
         if (!o.open) return;
         o.open = false;
         o.animating = false;
+        o.vel = 0;
         o.gliding = false;
         o.settled = false;
         o.go_after = null;
@@ -389,7 +437,11 @@ pub const Overview = struct {
                 best_cost = cost;
             }
         }
-        if (best) |i| o.select(i);
+        if (best) |i| return o.select(i);
+        // Nowhere to go that way: the ring gives a little, and comes back.
+        o.ring_vel[0] += dx * ring_nudge;
+        o.ring_vel[1] += dy * ring_nudge;
+        o.startTick();
     }
 
     /// Moves the ring to the next or the previous tab.
@@ -434,6 +486,8 @@ pub const Overview = struct {
             o.selected = i;
             o.focus = i;
             o.go_after = t.label;
+            o.ring_moved = true;
+            o.markChosen();
             return o.startGlide();
         }
     }
@@ -444,7 +498,6 @@ pub const Overview = struct {
         if (!o.open or o.animating) return;
         if (!o.gliding) o.takePictures(false);
         o.gliding = true;
-        o.last_frame = 0;
         o.startTick();
         o.widget().queueAllocate();
     }
@@ -520,6 +573,8 @@ pub const Overview = struct {
             card.as(gtk.Widget).setParent(o.widget());
             const label = gtk.Label.new(null);
             label.as(gtk.Widget).addCssClass("overview-name");
+            // A session's name is lit like the name of the tab the ring is on, not dimmed.
+            label.as(gtk.Widget).addCssClass("chosen");
             label.as(gtk.Widget).setCanTarget(0);
             label.setEllipsize(.end);
             var name: [200]u8 = undefined;
@@ -541,7 +596,29 @@ pub const Overview = struct {
         o.selected = index;
         // The ring is only seen at the grid, where the zoom comes from the tab it is on.
         if (!o.animating) o.focus = index;
+        // It slides to the tab from where it is, starting this frame, and the tab's name
+        // lights up.
+        const home = o.ringHome();
+        o.ring_off = .{ o.ring_at[0] - home[0], o.ring_at[1] - home[1] };
+        o.markChosen();
+        o.startTick();
         o.widget().queueAllocate();
+    }
+
+    /// Where the ring belongs: around the panes of the tab it is on, a little off them, not
+    /// around the tab's whole place, which is larger by the margins the panes keep.
+    fn ringHome(o: *Overview) [2]f64 {
+        if (o.selected >= o.tiles.items.len) return .{ 0, 0 };
+        const sel = o.contentRect(o.tiles.items[o.selected].cur);
+        return .{ @round(sel[0]) - ring_gap, @round(sel[1]) - ring_gap };
+    }
+
+    /// Lights the name of the tab the ring is on; the other names are dimmed.
+    fn markChosen(o: *Overview) void {
+        for (o.tiles.items, 0..) |t, i| {
+            const name = t.label.as(gtk.Widget);
+            if (i == o.selected) name.addCssClass("chosen") else name.removeCssClass("chosen");
+        }
     }
 
     /// The tabs changed on a server: the grid follows.
@@ -611,6 +688,7 @@ pub const Overview = struct {
         }
         o.selected = @min(o.selected, o.tiles.items.len -| 1);
         o.focus = @min(o.focus, o.tiles.items.len -| 1);
+        o.markChosen();
         if (!o.open) return;
         if (o.tiles.items.len == 0) o.hideNow() else o.widget().queueAllocate();
     }
@@ -680,10 +758,17 @@ pub const Overview = struct {
         // The ring stays on its tab, or where that tab was if it is gone.
         o.selected = @min(was_selected, o.tiles.items.len -| 1);
         o.focus = o.selected;
+        var kept = false;
         for (o.tiles.items, 0..) |t, i| {
-            if (t.label == had_selected) o.selected = i;
+            if (t.label == had_selected) {
+                o.selected = i;
+                kept = true;
+            }
             if (t.label == had_focus) o.focus = i;
         }
+        // On another tab now, the ring slides there from where it was.
+        if (!kept and o.settled) o.ring_moved = true;
+        o.markChosen();
         o.regroup();
         o.widget().queueAllocate();
         if (differs and o.settled) o.startGlide();
@@ -743,6 +828,7 @@ pub const Overview = struct {
         t.root = ws.root;
         t.shot = gtk.WidgetPaintable.new(ws.root);
         t.placed = false;
+        t.live = 0;
         if (t.host.server.sessionView(t.session_id)) |v| if (v.window(t.window_id)) |w| ws.show(t.session_id, w);
         o.widget().queueAllocate();
     }
@@ -759,6 +845,7 @@ pub const Overview = struct {
         t.ws = null;
         t.root = null;
         t.placed = false;
+        t.live = 0;
     }
 
     fn free(_: *Overview, t: *Tile) void {
@@ -784,7 +871,17 @@ pub const Overview = struct {
         return null;
     }
 
-    fn tileAt(o: *Overview, x: f64, y: f64) ?usize {
+    /// Whether the grid is near enough its place to be pointed at. The zoom's last settling is
+    /// too small to wait out before a click counts.
+    fn atGrid(o: *Overview) bool {
+        return !o.animating or (o.to == 1 and @abs(o.zoom - 1) < 0.03);
+    }
+
+    /// The tab at a point of the window, which is a point of the grid as the view shows it now.
+    fn tileAt(o: *Overview, at_x: f64, at_y: f64) ?usize {
+        const v = o.viewRect();
+        const x = v[0] + at_x * v[2] / @max(1, o.size[0]);
+        const y = v[1] + at_y * v[3] / @max(1, o.size[1]);
         for (o.tiles.items, 0..) |t, i| {
             const r = t.rect;
             // A tab's name under it counts as the tab.
@@ -796,7 +893,7 @@ pub const Overview = struct {
 
     fn clicked(_: *gtk.GestureClick, _: c_int, x: f64, y: f64, o: *Overview) callconv(.c) void {
         // A click lands on the grid only once the grid is what is shown.
-        if (o.animating) return;
+        if (!o.atGrid()) return;
         if (o.tileAt(x, y)) |i| o.pick(i) else o.close();
     }
 
@@ -805,7 +902,7 @@ pub const Overview = struct {
         const first = o.pointer[0] < 0;
         o.pointer = .{ x, y };
         // The pointer happening to be over a tab as the grid appears picks nothing.
-        if (still or first or o.animating) return;
+        if (still or first or !o.atGrid()) return;
         if (o.tileAt(x, y)) |i| o.select(i);
     }
 
@@ -891,7 +988,14 @@ pub const Overview = struct {
         // The ring goes around the panes themselves, a little off them, not around the tab's
         // whole place, which is larger by the margins the panes keep in the window.
         const sel = if (o.selected < n) o.contentRect(o.tiles.items[o.selected].cur) else [4]f64{ 0, 0, 1, 1 };
-        place(o.ring, @round(sel[2]) + 2 * ring_gap, @round(sel[3]) + 2 * ring_gap, @round(sel[0]) - ring_gap, @round(sel[1]) - ring_gap, 1);
+        const home = o.ringHome();
+        // On a tab that had no place until now, it starts from where it was last drawn.
+        if (o.ring_moved) {
+            o.ring_moved = false;
+            o.ring_off = .{ o.ring_at[0] - home[0], o.ring_at[1] - home[1] };
+        }
+        o.ring_at = .{ home[0] + o.ring_off[0], home[1] + o.ring_off[1] };
+        place(o.ring, @round(sel[2]) + 2 * ring_gap, @round(sel[3]) + 2 * ring_gap, o.ring_at[0], o.ring_at[1], 1);
         // The two buttons side by side in the middle of the foot, the keys at its right end.
         const buttons = [_]*gtk.Widget{ o.group_button.as(gtk.Widget), o.button.as(gtk.Widget) };
         var sizes: [2][2]f64 = undefined;
@@ -928,42 +1032,71 @@ pub const Overview = struct {
     // The zoom, and the previews after it.
 
     fn startTick(o: *Overview) void {
-        if (o.tick == 0) o.tick = o.widget().addTickCallback(&onTick, o, null);
+        if (o.tick != 0 or o.held) return;
+        o.last_frame = 0;
+        o.tick = o.widget().addTickCallback(&onTick, o, null);
     }
 
     fn onTick(_: *gtk.Widget, clock: *gdk.FrameClock, data: ?*anyopaque) callconv(.c) c_int {
         const o: *Overview = @ptrCast(@alignCast(data.?));
         const now = clock.getFrameTime();
+        const dt = if (o.last_frame == 0) 1.0 / 60.0 else std.math.clamp(@as(f64, @floatFromInt(now - o.last_frame)) / 1_000_000, 0.001, 0.05);
+        o.last_frame = now;
+        if (!o.held and o.advance(dt)) return 1;
+        o.tick = 0;
+        return 0;
+    }
+
+    /// Moves everything that is moving on by `dt` seconds: the ring, the previews fading in,
+    /// the tabs gliding, the zoom, and after it the making of the previews. False once there
+    /// is nothing left to do.
+    fn advance(o: *Overview, dt: f64) bool {
+        var busy = o.moveRing(dt);
+        // A preview that has its place fades in over what stood for it.
+        if (!o.animating and !o.gliding) for (o.tiles.items) |*t| {
+            if (!t.placed or t.live >= 1) continue;
+            t.live = @min(1, t.live + dt * 1000 / fade_ms);
+            busy = true;
+            o.widget().queueDraw();
+        };
         if (o.gliding and !o.animating) {
-            const dt = if (o.last_frame == 0) 1.0 / 60.0 else std.math.clamp(@as(f64, @floatFromInt(now - o.last_frame)) / 1_000_000, 0.001, 0.05);
-            o.last_frame = now;
             o.widget().queueAllocate();
-            if (o.glide(dt)) return 1;
+            if (o.glide(dt)) return true;
             o.gliding = false;
             // A tab made with the overview open is gone to now that it is in its place.
             if (o.go_after) |label| {
                 o.go_after = null;
                 for (o.tiles.items, 0..) |t, i| if (t.label == label) {
                     o.pick(i);
-                    return 1;
+                    return true;
                 };
             }
-            return 1;
+            return true;
         }
         if (o.animating) {
-            if (o.started == 0) o.started = now;
-            const p = std.math.clamp(@as(f64, @floatFromInt(now - o.started)) / (zoom_ms * 1000), 0, 1);
-            o.zoom = o.from + (o.to - o.from) * ease(p);
+            // A spring pulls the zoom to where it is going, in steps short enough to stay true
+            // through a slow frame.
+            const drag = 2 * @sqrt(zoom_stiffness) * zoom_damping;
+            var left = dt;
+            while (left > 0) : (left -= 0.004) {
+                const h = @min(left, 0.004);
+                o.vel += (-zoom_stiffness * (o.zoom - o.to) - drag * o.vel) * h;
+                o.zoom += o.vel * h;
+            }
             o.widget().queueDraw();
-            if (p < 1) return 1;
+            // Into a tab it stops as it arrives; out at the grid it stops once it has settled.
+            const there = if (o.to == 0) o.zoom <= 0 else @abs(o.zoom - o.to) < 0.0015 and @abs(o.vel) < 0.02;
+            if (!there) return true;
+            o.zoom = o.to;
+            o.vel = 0;
             o.animating = false;
             if (o.to == 0) {
                 // Zoomed all the way in, the tab itself takes over from its copy.
                 o.tick = 0;
                 o.hideNow();
-                return 0;
+                return false;
             }
-            return 1;
+            return true;
         }
         // The grid is still: the previews are made, one a frame, the focus tab's first.
         const order = [_]?usize{ if (o.focus < o.tiles.items.len) o.focus else null, null };
@@ -971,25 +1104,61 @@ pub const Overview = struct {
             if (first) |i| {
                 if (o.tiles.items[i].ws == null) {
                     o.makePreview(&o.tiles.items[i]);
-                    return 1;
+                    return true;
                 }
             } else for (o.tiles.items) |*t| if (t.ws == null) {
                 o.makePreview(t);
-                return 1;
+                return true;
             };
         }
-        // A preview that has its place is what is drawn from then on; the sharp picture the
+        // A preview that has faded in is what is drawn from then on; the sharp picture the
         // zoom out left in its place has done its work.
         var waiting = false;
         for (o.tiles.items) |*t| {
-            if (!t.placed) waiting = true else if (t.sharp) |p| {
+            if (!t.placed or t.live < 1) waiting = true else if (t.sharp) |p| {
                 p.unref();
                 t.sharp = null;
             }
         }
-        if (waiting) return 1;
-        o.tick = 0;
-        return 0;
+        return waiting or busy;
+    }
+
+    /// Moves the ring a step toward the tab it is on. False once it is there and still.
+    fn moveRing(o: *Overview, dt: f64) bool {
+        const still = o.ring_off[0] == 0 and o.ring_off[1] == 0 and o.ring_vel[0] == 0 and o.ring_vel[1] == 0;
+        // Told to start from where it was drawn, it does so at the next layout.
+        if (still) return o.ring_moved;
+        const drag = 2 * @sqrt(ring_stiffness) * ring_damping;
+        var left = dt;
+        while (left > 0) : (left -= 0.004) {
+            const h = @min(left, 0.004);
+            for (0..2) |i| {
+                o.ring_vel[i] += (-ring_stiffness * o.ring_off[i] - drag * o.ring_vel[i]) * h;
+                o.ring_off[i] += o.ring_vel[i] * h;
+            }
+        }
+        if (@abs(o.ring_off[0]) < 0.3 and @abs(o.ring_off[1]) < 0.3 and @abs(o.ring_vel[0]) < 5 and @abs(o.ring_vel[1]) < 5) {
+            o.ring_off = .{ 0, 0 };
+            o.ring_vel = .{ 0, 0 };
+        }
+        o.widget().queueAllocate();
+        return true;
+    }
+
+    /// Development: stops the overview's clock and moves it on by hand, `ms` at a time, so a
+    /// picture can be taken part-way through a zoom or a slide. Null lets it run again.
+    pub fn hold(o: *Overview, ms: ?f64) void {
+        const by = ms orelse {
+            o.held = false;
+            if (o.open) o.startTick();
+            return;
+        };
+        o.held = true;
+        var left = by / 1000;
+        while (left > 0 and o.open) : (left -= 1.0 / 240.0) _ = o.advance(1.0 / 240.0);
+        if (!o.open) return;
+        o.widget().queueAllocate();
+        o.widget().queueDraw();
     }
 
     fn screenScale(o: *Overview) f64 {
@@ -1068,13 +1237,64 @@ pub const Overview = struct {
         };
     }
 
+    /// How a tab other than the one zoomed out of lands in the grid: smaller and fainter until
+    /// the zoom reaches it, the farthest tab last. `far` is how far the farthest is.
+    const Landing = struct { scale: f64 = 1, alpha: f64 = 1 };
+
+    fn landing(o: *Overview, index: usize, far: f64) Landing {
+        if (index == o.focus or o.zoom >= 1 or o.focus >= o.tiles.items.len) return .{};
+        const from = center(o.tiles.items[o.focus].rect);
+        const at = center(o.tiles.items[index].rect);
+        const wait = land_wait * std.math.hypot(at[0] - from[0], at[1] - from[1]) / far;
+        const q = std.math.clamp((o.zoom - wait) / (1 - wait), 0, 1);
+        return .{ .scale = land_from + (1 - land_from) * q, .alpha = std.math.clamp(q * 1.6, 0, 1) };
+    }
+
+    /// A tab as a still: its sharp picture, its picture at the grid's size, or a plain card.
+    fn drawStill(o: *Overview, sn: *gtk.Snapshot, t: *const Tile) void {
+        const c = o.contentRect(t.cur);
+        const bounds: graphene.Rect = .{ .f_origin = .{ .f_x = @floatCast(c[0]), .f_y = @floatCast(c[1]) }, .f_size = .{ .f_width = @floatCast(c[2]), .f_height = @floatCast(c[3]) } };
+        // Pictures are drawn as plain textures. A texture node that names a way of scaling
+        // is first made into a picture the size of its bounds, in the grid's own units,
+        // and that picture is then enlarged by the zoom and by the screen's scale, which
+        // blurs it badly. A plain one is drawn straight from its own pixels.
+        if (t.sharp) |sharp| {
+            // The sharp picture all the way, giving way to the grid's own only as the tab
+            // settles into the grid, so neither end of the zoom shows a change of picture
+            // and the text stays crisp in between.
+            const near_grid = std.math.clamp((o.zoom - 0.8) / 0.2, 0, 1);
+            if (t.picture != null and near_grid > 0) {
+                sn.pushCrossFade(near_grid * near_grid);
+                sn.appendTexture(sharp, &bounds);
+                sn.pop();
+                sn.appendTexture(t.picture.?, &bounds);
+                sn.pop();
+            } else sn.appendTexture(sharp, &bounds);
+        } else if (t.picture) |picture| {
+            sn.appendTexture(picture, &bounds);
+        } else o.widget().snapshotChild(t.blank, sn);
+    }
+
     fn draw(o: *Overview, sn: *gtk.Snapshot) void {
         const w = o.widget();
         if (o.size[0] < 1 or o.tiles.items.len == 0) return;
+        // The zoom passes the grid a little as it settles; nothing is more than fully there.
+        const out = std.math.clamp(o.zoom, 0, 1);
         // In full screen mode the window draws nothing behind the panes, so the grid would lie
         // straight on the desktop, where a bright wallpaper swallows the names: it is dimmed.
-        if (o.app.bare and o.zoom > 0.01) {
-            sn.appendColor(&.{ .f_red = 0, .f_green = 0, .f_blue = 0, .f_alpha = @floatCast(0.34 * o.zoom) }, &.{ .f_origin = .{ .f_x = 0, .f_y = 0 }, .f_size = .{ .f_width = @floatCast(o.size[0]), .f_height = @floatCast(o.size[1]) } });
+        if (o.app.bare and out > 0.01) {
+            sn.appendColor(&.{ .f_red = 0, .f_green = 0, .f_blue = 0, .f_alpha = @floatCast(0.34 * out) }, &.{ .f_origin = .{ .f_x = 0, .f_y = 0 }, .f_size = .{ .f_width = @floatCast(o.size[0]), .f_height = @floatCast(o.size[1]) } });
+        }
+        // What belongs to the grid, its names, dots, ring and foot, comes in over the second
+        // half of the zoom: before that it would be drawn many times its size across the tab.
+        const chrome = smooth((out - 0.5) / 0.5);
+        var far: f64 = 1;
+        if (o.focus < o.tiles.items.len) {
+            const from = center(o.tiles.items[o.focus].rect);
+            for (o.tiles.items) |t| {
+                const at = center(t.rect);
+                far = @max(far, std.math.hypot(at[0] - from[0], at[1] - from[1]));
+            }
         }
         const v = o.viewRect();
         const k: f32 = @floatCast(o.size[0] / @max(1, v[2]));
@@ -1082,48 +1302,41 @@ pub const Overview = struct {
         sn.scale(k, k);
         sn.translate(&.{ .f_x = @floatCast(-v[0]), .f_y = @floatCast(-v[1]) });
         // Each session's card lies under its tabs, and fades with the names.
-        if (o.groups.items.len > 0 and o.zoom > 0.01) {
-            sn.pushOpacity(o.zoom);
+        if (o.groups.items.len > 0 and chrome > 0.01) {
+            sn.pushOpacity(chrome);
             for (o.groups.items) |g| w.snapshotChild(g.card, sn);
             sn.pop();
         }
-        for (o.tiles.items) |t| {
-            // At rest a tab is its live preview, once there is one. While the zoom runs, and
-            // until then, it is a picture, or failing that a plain card.
-            if (!o.animating and !o.gliding and t.placed) {
-                if (t.root) |root| {
-                    w.snapshotChild(root, sn);
+        for (o.tiles.items, 0..) |*t, i| {
+            const land = o.landing(i, far);
+            const alpha = t.alpha * land.alpha;
+            if (land.scale < 1) {
+                sn.save();
+                scaleAbout(sn, center(t.cur), land.scale);
+            }
+            defer if (land.scale < 1) sn.restore();
+            if (alpha < 1) sn.pushOpacity(alpha);
+            defer if (alpha < 1) sn.pop();
+            // At rest a tab is its live preview, once there is one, faded in over what stood
+            // for it. While the zoom runs, and until then, it is a picture, or failing that
+            // a plain card.
+            const root = if (!o.animating and !o.gliding and t.placed) t.root else null;
+            if (root) |live| {
+                if (t.live >= 1) {
+                    w.snapshotChild(live, sn);
                     continue;
                 }
+                sn.pushCrossFade(t.live);
+                o.drawStill(sn, t);
+                sn.pop();
+                w.snapshotChild(live, sn);
+                sn.pop();
+                continue;
             }
-            if (t.alpha < 1) sn.pushOpacity(t.alpha);
-            defer if (t.alpha < 1) sn.pop();
-            const c = o.contentRect(t.cur);
-            const bounds: graphene.Rect = .{ .f_origin = .{ .f_x = @floatCast(c[0]), .f_y = @floatCast(c[1]) }, .f_size = .{ .f_width = @floatCast(c[2]), .f_height = @floatCast(c[3]) } };
-            // Pictures are drawn as plain textures. A texture node that names a way of scaling
-            // is first made into a picture the size of its bounds, in the grid's own units,
-            // and that picture is then enlarged by the zoom and by the screen's scale, which
-            // blurs it badly. A plain one is drawn straight from its own pixels.
-            if (t.sharp) |sharp| {
-                // The sharp picture all the way, giving way to the grid's own only as the tab
-                // settles into the grid, so neither end of the zoom shows a change of picture
-                // and the text stays crisp in between.
-                const near_grid = std.math.clamp((o.zoom - 0.8) / 0.2, 0, 1);
-                if (t.picture != null and near_grid > 0) {
-                    sn.pushCrossFade(near_grid * near_grid);
-                    sn.appendTexture(sharp, &bounds);
-                    sn.pop();
-                    sn.appendTexture(t.picture.?, &bounds);
-                    sn.pop();
-                } else sn.appendTexture(sharp, &bounds);
-            } else if (t.picture) |picture| {
-                sn.appendTexture(picture, &bounds);
-            } else w.snapshotChild(t.blank, sn);
+            o.drawStill(sn, t);
         }
-        // The names, dots and ring belong to the grid, and fade as a tab comes to fill the
-        // window.
-        if (o.zoom > 0.01) {
-            sn.pushOpacity(o.zoom);
+        if (chrome > 0.01) {
+            sn.pushOpacity(chrome);
             // A closed tab fades out where it was, as its last picture or a plain card.
             for (o.leaving.items) |t| {
                 sn.pushOpacity(t.alpha);
@@ -1133,21 +1346,41 @@ pub const Overview = struct {
                 } else w.snapshotChild(t.blank, sn);
                 sn.pop();
             }
-            for (o.tiles.items) |t| {
-                if (t.alpha < 1) sn.pushOpacity(t.alpha);
-                inline for (.{ t.label.as(gtk.Widget), t.badges.as(gtk.Widget), t.host_chip.as(gtk.Widget) }) |mark| {
+            // The names rise the last of their way into place as they appear.
+            const rise: graphene.Point = .{ .f_x = 0, .f_y = @floatCast(name_rise * (1 - chrome)) };
+            for (o.tiles.items, 0..) |t, i| {
+                const land = o.landing(i, far);
+                const alpha = t.alpha * land.alpha;
+                if (land.scale < 1) {
+                    sn.save();
+                    scaleAbout(sn, center(t.cur), land.scale);
+                }
+                if (alpha < 1) sn.pushOpacity(alpha);
+                sn.save();
+                sn.translate(&rise);
+                w.snapshotChild(t.label.as(gtk.Widget), sn);
+                sn.restore();
+                inline for (.{ t.badges.as(gtk.Widget), t.host_chip.as(gtk.Widget) }) |mark| {
                     if (mark.getVisible() != 0) w.snapshotChild(mark, sn);
                 }
-                if (t.alpha < 1) sn.pop();
+                if (alpha < 1) sn.pop();
+                if (land.scale < 1) sn.restore();
             }
+            sn.save();
+            sn.translate(&rise);
             for (o.groups.items) |g| w.snapshotChild(g.label.as(gtk.Widget), sn);
+            sn.restore();
             w.snapshotChild(o.ring, sn);
             sn.pop();
         }
         sn.restore();
-        if (o.zoom > 0.01) {
-            sn.pushOpacity(o.zoom);
+        // The foot comes up from below as it appears.
+        if (chrome > 0.01) {
+            sn.pushOpacity(chrome);
+            sn.save();
+            sn.translate(&.{ .f_x = 0, .f_y = @floatCast(foot_rise * (1 - smooth(out))) });
             inline for (.{ o.group_button.as(gtk.Widget), o.button.as(gtk.Widget), o.hint.as(gtk.Widget) }) |foot| w.snapshotChild(foot, sn);
+            sn.restore();
             sn.pop();
         }
     }
@@ -1215,22 +1448,17 @@ test "a grid's cells have the window's shape and stay inside the area" {
     }
 }
 
-/// How far along the zoom is at a share `p` of its time: off quickly, then a long, gentle
-/// arrival. The curve is cubic-bezier(0.2, 0, 0, 1).
-fn ease(p: f64) f64 {
-    if (p <= 0) return 0;
-    if (p >= 1) return 1;
-    // The curve gives time and progress for a parameter t; t is found for this time.
-    var t = p;
-    for (0..8) |_| {
-        const u = 1 - t;
-        const x = 3 * u * u * t * 0.2 + t * t * t;
-        const slope = 3 * u * u * 0.2 - 6 * u * t * 0.2 + 3 * t * t;
-        if (@abs(slope) < 1e-6) break;
-        t = std.math.clamp(t - (x - p) / slope, 0, 1);
-    }
-    const u = 1 - t;
-    return 3 * u * t * t + t * t * t;
+/// A share of the way, 0 to 1, eased at both ends.
+fn smooth(t: f64) f64 {
+    const x = std.math.clamp(t, 0, 1);
+    return x * x * (3 - 2 * x);
+}
+
+/// Scales what is drawn next about a point.
+fn scaleAbout(sn: *gtk.Snapshot, about: [2]f64, by: f64) void {
+    sn.translate(&.{ .f_x = @floatCast(about[0]), .f_y = @floatCast(about[1]) });
+    sn.scale(@floatCast(by), @floatCast(by));
+    sn.translate(&.{ .f_x = @floatCast(-about[0]), .f_y = @floatCast(-about[1]) });
 }
 
 /// What a tab's kept picture is filed under. Window IDs are only one server's own, so the

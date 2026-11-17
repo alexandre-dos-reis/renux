@@ -227,7 +227,8 @@ const css =
     \\.hint-desc { font-size: 0.92em; }
     \\.mode-chip { background-color: @accent_bg_color; color: @accent_fg_color; font-weight: 700; font-size: 0.85em; border-radius: 99px; padding: 6px 16px; box-shadow: 0 4px 16px alpha(black, 0.35); }
     \\.connect-box { margin: 0 24px; }
-    \\.overview-name { font-size: 0.9em; font-weight: 600; color: @window_fg_color; text-shadow: 0 1px 4px alpha(black, 0.7); }
+    \\.overview-name { font-size: 0.9em; font-weight: 600; color: alpha(@window_fg_color, 0.55); text-shadow: 0 1px 4px alpha(black, 0.7); transition: color 140ms ease-out; }
+    \\.overview-name.chosen { color: @window_fg_color; }
     \\.overview-dots { background-color: alpha(black, 0.38); border-radius: 99px; padding: 4px 6px; }
     \\.overview-dot { min-width: 7px; min-height: 7px; border-radius: 99px; background-color: alpha(white, 0.32); }
     \\.overview-dot.working { background-color: #5aa9ff; }
@@ -4926,6 +4927,13 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
                     break;
                 }
             }
+            continue;
+        }
+        if (std.mem.eql(u8, cmd, "overview-step")) {
+            // The overview's motion by hand, for a picture part-way through it: `overview-step
+            // 120` stops its clock and moves it on 120 ms, and `overview-step off` lets it run.
+            const by = it.next() orelse continue;
+            a.overview.hold(if (std.mem.eql(u8, by, "off")) null else std.fmt.parseFloat(f64, by) catch 0);
             continue;
         }
         if (std.mem.eql(u8, cmd, "overview-key")) {
