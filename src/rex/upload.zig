@@ -224,7 +224,7 @@ pub const Upload = struct {
         u.sizes[u.index] = u.size;
         u.sent = 0;
         if (u.ctl != null) return u.reserve();
-        u.ctl = control.Control.open(u.server.url, "Renux file upload", @import("server.zig").version, null, revision, .{
+        u.ctl = control.Control.open(u.server.connectionUrl(), "Renux file upload", @import("server.zig").version, null, revision, .{
             .ctx = u,
             .on_welcome = welcomed,
             .on_event = event,
@@ -282,7 +282,7 @@ pub const Upload = struct {
         const ticket = json.str(payload, "ticket") orelse return u.finish(.failed, "Rex returned no upload ticket");
         const hello = @import("stream.zig").helloFor(ticket) orelse return u.finish(.failed, "Rex returned an invalid upload ticket");
         u.ready = false;
-        u.socket = ws.Socket.open(.{ .url = u.server.url, .path = "/api/data", .protocol = protocol, .first_message = &hello }, .{
+        u.socket = ws.Socket.open(.{ .url = u.server.connectionUrl(), .path = "/api/data", .protocol = protocol, .first_message = &hello }, .{
             .ctx = u,
             .on_open = dataOpened,
             .on_message = dataMessage,

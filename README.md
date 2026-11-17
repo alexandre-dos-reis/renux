@@ -36,9 +36,11 @@ and please report them as [issues](https://github.com/zenodea/renux/issues).
   Ctrl to underline a detected path; Esc closes the peek. For paths with ambiguous spacing,
   select the path and choose **Preview Selected Path** from the right-click menu, which
   offers **Open With…** for other formats. Requires Rex API 13; files up to 16 MiB.
-- **Several servers.** Connect to more than one Rex server, on this computer or over Tailscale,
-  and be told when one could be updated. Remote hosts can answer to this computer's keys and
-  keep their own colors.
+- **Several servers.** Connect to more than one Rex server, on this computer, over Tailscale,
+  or through SSH (`user@box` or `ssh://user@box:2222`). SSH uses your system's keys, config and
+  agent, with one connection shared by terminals and file transfers. Trust the host and unlock
+  your key in a terminal first; Renux does not answer SSH questions yet. Remote hosts can answer
+  to this computer's keys and keep their own colors. See [SSH hosts](docs/ssh-hosts.md).
 - **Made to look at.** Themes, a see-through window with the desktop's blur behind it, and
   custom GLSL shaders as in Ghostty: ten ship with Renux, from a CRT to a cursor that smears as
   it moves.

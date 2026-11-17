@@ -105,6 +105,7 @@ pub const Performer = struct {
 pub const Server = struct {
     url: []u8,
     client_label: []u8,
+    ssh: ?*@import("ssh.zig").Tunnel = null,
     control: ?*Control = null,
     /// The connection being opened or in use. Only its close counts.
     attempt: ?*Control = null,
@@ -204,6 +205,7 @@ pub const Server = struct {
         var it = s.streams.valueIterator();
         while (it.next()) |st| st.*.destroy();
         s.streams.deinit(gpa);
+        if (s.ssh) |t| t.stop();
         s.parked.deinit(gpa);
         var vit = s.views.valueIterator();
         while (vit.next()) |v| v.*.destroy();
@@ -265,9 +267,34 @@ pub const Server = struct {
 
     // Connecting.
 
+    /// All channels share one SSH forward, but the saved URL stays remote for UI and settings.
+    pub fn connectionUrl(s: *const Server) []const u8 {
+        return if (s.ssh) |t| t.url else s.url;
+    }
+
     fn startConnecting(s: *Server) void {
         s.setState(.connecting, "");
-        const c = Control.open(s.url, s.client_label, version, s.reconnect_token, control.api_revision, .{
+        if (@import("ssh.zig").isSsh(s.url)) {
+            if (s.ssh) |t| t.stop();
+            s.ssh = null;
+            s.ssh = @import("ssh.zig").Tunnel.start(s.url, .{ .ctx = s, .changed = sshChanged }) catch {
+                s.scheduleReconnect("Couldn't start SSH: check the address and that ssh is installed");
+                return;
+            };
+            return;
+        }
+        s.openControl();
+    }
+
+    fn sshChanged(ctx: *anyopaque, reason: ?[]const u8) void {
+        const s: *Server = @ptrCast(@alignCast(ctx));
+        if (reason) |message| {
+            if (s.attempt) |c| s.failed(c, message) else s.scheduleReconnect(message);
+        } else s.openControl();
+    }
+
+    fn openControl(s: *Server) void {
+        const c = Control.open(s.connectionUrl(), s.client_label, version, s.reconnect_token, control.api_revision, .{
             .ctx = s,
             .on_welcome = onWelcome,
             .on_event = onEvent,
@@ -1720,10 +1747,10 @@ pub const Server = struct {
         const a = s.hosts_arena.allocator();
         var list: std.ArrayList(ListedHost) = .empty;
         for (json.array(payload, "hosts")) |h| {
-            // The first web address is the one a client connects to.
+            // The first supported address is the one a client connects to.
             var url: ?[]const u8 = null;
             for (json.array(h, "endpoints")) |e| switch (e) {
-                .string => |t| if (url == null and (std.mem.startsWith(u8, t, "http://") or std.mem.startsWith(u8, t, "https://"))) {
+                .string => |t| if (url == null and (std.mem.startsWith(u8, t, "http://") or std.mem.startsWith(u8, t, "https://") or @import("ssh.zig").isSsh(t))) {
                     url = t;
                 },
                 else => {},

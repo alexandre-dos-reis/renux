@@ -230,7 +230,7 @@ pub const Stream = struct {
     fn connect(s: *Stream, handshake: []const u8) void {
         s.welcomed = false;
         s.socket = ws.Socket.open(.{
-            .url = s.server.url,
+            .url = s.server.connectionUrl(),
             .path = "/api/data",
             .protocol = protocol,
             .first_message = handshake,

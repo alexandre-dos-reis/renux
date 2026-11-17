@@ -451,7 +451,9 @@ pub const App = struct {
     }
 
     pub fn run(a: *App) c_int {
-        return a.app.as(gio.Application).run(0, null);
+        const code = a.app.as(gio.Application).run(0, null);
+        for (a.hosts.items) |h| if (h.server.ssh) |t| t.stop();
+        return code;
     }
 
     fn activate(_: *adw.Application, a: *App) callconv(.c) void {
@@ -1273,12 +1275,12 @@ pub const App = struct {
         const page = adw.StatusPage.new();
 
         page.setTitle("Connect to Rex");
-        page.setDescription("Enter the address your Rex server listens on, such as http://my-mac:8765.");
+        page.setDescription("Enter a Rex address, such as user@box, ssh://user@box:2222 or http://my-mac:8765. SSH needs a trusted host key and an unlocked key or agent.");
         const box = gtk.Box.new(.vertical, 12);
         box.as(gtk.Widget).addCssClass("connect-box");
         box.as(gtk.Widget).setHalign(.center);
         a.entry = gtk.Entry.new();
-        a.entry.setPlaceholderText("http://host:port");
+        a.entry.setPlaceholderText("user@box or http://host:port");
         a.entry.as(gtk.Widget).setSizeRequest(360, -1);
         _ = gtk.Entry.signals.activate.connect(a.entry, *App, &connectClicked, a, .{});
         const button = gtk.Button.newWithLabel("Connect");
@@ -1297,7 +1299,7 @@ pub const App = struct {
     }
 
     fn connectClicked(entry: *gtk.Entry, a: *App) callconv(.c) void {
-        const url = normalizeUrl(std.mem.span(entry.as(gtk.Editable).getText())) orelse return;
+        const url = normalizeUrl(std.mem.span(entry.as(gtk.Editable).getText())) orelse return a.toast("Enter a Rex address or an SSH address such as user@box or ssh://user@box:2222");
         defer gpa.free(url);
         settings.addHost(settings.labelFor(url), url);
         if (a.addHost(settings.labelFor(url), url)) |h| a.selectHost(h);
@@ -2238,10 +2240,10 @@ pub const App = struct {
     /// Asks for a Rex server's address, saves it, and connects. Rex devices on this computer's
     /// tailnet are offered with one click, and an address on the clipboard is filled in.
     fn addHostDialog(a: *App) void {
-        const dialog = adw.AlertDialog.new("Add Remote Host", "A Rex HTTP or HTTPS address, such as the one Rex's Pair button shows");
+        const dialog = adw.AlertDialog.new("Add Remote Host", "An SSH address (user@box), or a Rex HTTP or HTTPS address");
         const box = gtk.Box.new(.vertical, 8);
         const url = gtk.Entry.new();
-        url.setPlaceholderText("https://my-mac-rex.tailnet.ts.net");
+        url.setPlaceholderText("user@box or https://host");
         url.setActivatesDefault(1);
         const name = gtk.Entry.new();
         name.setPlaceholderText("Name (optional)");
@@ -2349,7 +2351,7 @@ pub const App = struct {
     fn hostAdded(_: *adw.AlertDialog, response: [*:0]const u8, ctx: *AddHostCtx) callconv(.c) void {
         defer gpa.destroy(ctx);
         if (!std.mem.eql(u8, std.mem.span(response), "add")) return;
-        const url = normalizeUrl(std.mem.span(ctx.url.as(gtk.Editable).getText())) orelse return;
+        const url = normalizeUrl(std.mem.span(ctx.url.as(gtk.Editable).getText())) orelse return ctx.app.toast("Enter a Rex address or an SSH address such as user@box or ssh://user@box:2222");
         defer gpa.free(url);
         const typed = std.mem.trim(u8, std.mem.span(ctx.name.as(gtk.Editable).getText()), " ");
         const label = if (typed.len > 0) typed else settings.labelFor(url);
@@ -4805,13 +4807,10 @@ fn windowTitle(buf: []u8, w: *const view.Window, v: *const view.SessionView) [:0
 /// A program as rows and tabs name it: "-zsh" and "node/server.js" are "zsh" and "node".
 const programName = @import("../icons/programs.zig").programName;
 
-/// A typed server address as a URL, with http:// when it names no scheme, or null when nothing
-/// was typed. The caller frees it.
+/// A typed server address as a URL; user@host means SSH, other bare addresses mean HTTP.
+/// The caller frees it.
 fn normalizeUrl(typed: []const u8) ?[]u8 {
-    const raw = std.mem.trim(u8, typed, " ");
-    if (raw.len == 0) return null;
-    if (std.mem.indexOf(u8, raw, "://") == null) return std.fmt.allocPrint(gpa, "http://{s}", .{raw}) catch null;
-    return gpa.dupe(u8, raw) catch null;
+    return @import("../rex/ssh.zig").normalizeUrl(gpa, typed) catch null;
 }
 
 fn eqlOpt(a: ?[]const u8, b: []const u8) bool {

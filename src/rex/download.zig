@@ -49,7 +49,7 @@ pub const Download = struct {
         try active.append(gpa, d);
         errdefer _ = active.pop();
         d.* = .{ .server = server, .sid = s, .bid = b, .path = p, .listener = listener };
-        d.ctl = try control.Control.open(server.url, "Renux file preview", @import("server.zig").version, null, 13, .{
+        d.ctl = try control.Control.open(server.connectionUrl(), "Renux file preview", @import("server.zig").version, null, 13, .{
             .ctx = d,
             .on_welcome = welcome,
             .on_event = event,
@@ -117,7 +117,7 @@ pub const Download = struct {
         if (json.int(payload, "size")) |size| if (size > limit) return d.finish(false, "File is too large to preview (16 MiB limit)");
         const ticket = json.str(payload, "ticket") orelse return d.finish(false, "Rex returned no download ticket");
         const hello = @import("stream.zig").helloFor(ticket) orelse return d.finish(false, "Invalid download ticket");
-        d.socket = ws.Socket.open(.{ .url = d.server.url, .path = "/api/data", .protocol = "rex.data.bytes.v1", .first_message = &hello }, .{
+        d.socket = ws.Socket.open(.{ .url = d.server.connectionUrl(), .path = "/api/data", .protocol = "rex.data.bytes.v1", .first_message = &hello }, .{
             .ctx = d,
             .on_open = opened,
             .on_message = message,
