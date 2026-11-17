@@ -694,6 +694,8 @@ pub const App = struct {
         layered.addOverlay(corner.as(gtk.Widget));
         // Which Rex key mode is on, such as resize, while one is.
         a.mode_chip = gtk.Label.new("");
+        a.mode_chip.setEllipsize(.middle);
+        a.mode_chip.setMaxWidthChars(80);
         a.mode_chip.as(gtk.Widget).addCssClass("mode-chip");
         a.mode_chip.as(gtk.Widget).setHalign(.center);
         a.mode_chip.as(gtk.Widget).setValign(.end);
@@ -3139,6 +3141,10 @@ pub const App = struct {
     fn paneAction(a: *App, name: []const u8, args: ?@import("../util/json.zig").Value) bool {
         const J = @import("../util/json.zig");
         const eql = std.mem.eql;
+        if (std.mem.startsWith(u8, name, "copy_mode.")) {
+            const tv = (a.workspace orelse return false).focusedView() orelse return false;
+            return @import("../terminal/copyview.zig").action(tv, name[10..], args);
+        }
         if (eql(u8, name, "zoom")) return a.did(zoomPane);
         if (std.mem.startsWith(u8, name, "focus.")) return a.focusDirection(name[6..]);
         if (std.mem.startsWith(u8, name, "split.")) return a.splitToward(name[6..]);
@@ -4547,6 +4553,7 @@ pub fn describeAction(a: *App, buf: []u8, action: []const u8, args: ?[]const u8,
     if (a.server) |s| for (s.actions) |act| if (std.mem.eql(u8, act.name, action) and act.title.len > 0) {
         title = act.title;
     };
+    if (title.len == 0 and std.mem.eql(u8, action, "pane.copy_mode.enter")) title = "Enter copy mode";
     var name_buf: [64]u8 = undefined;
     const known = [_][2][]const u8{
         .{ "pane.split", "Split" },                          .{ "pane.focus", "Focus" },
@@ -4634,6 +4641,15 @@ fn freeData(data: ?*anyopaque) callconv(.c) void {
 
 fn modeChanged() void {
     const a = mode_app orelse return;
+    if (a.workspace) |ws| if (ws.focusedView()) |tv| {
+        var copy_buf: [1200]u8 = undefined;
+        if (@import("../terminal/copyview.zig").status(tv, &copy_buf)) |text| {
+            a.mode_chip.setText(text.ptr);
+            a.mode_chip.as(gtk.Widget).addCssClass("shown");
+            showHints(a, &.{});
+            return;
+        }
+    };
     const mode = termview.keyMode();
     if (mode.len == 0) {
         a.mode_chip.as(gtk.Widget).removeCssClass("shown");
@@ -4848,9 +4864,16 @@ fn installShotHook(a: *App) void {
     if (std.c.getenv("RENUX_SCRIPT") != null) _ = @import("glibunix").signalAdd(@backingInt(std.posix.SIG.USR2), &runScript, null);
 }
 
+fn scriptClipboard(source: ?*gobject.Object, result: *gio.AsyncResult, _: ?*anyopaque) callconv(.c) void {
+    const clipboard: *gdk.Clipboard = @ptrCast(source orelse return);
+    const text = clipboard.readTextFinish(result, null) orelse return;
+    defer glib.free(text);
+    std.log.info("clipboard: [{s}]", .{std.mem.span(text)});
+}
+
 /// Development: SIGUSR2 runs the commands in $RENUX_SCRIPT against the focused pane, so
 /// selection and find can be checked without a mouse. One command per line:
-/// `find TEXT`, `select X1 Y1 X2 Y2`, `word X Y`, `copy`, `type TEXT`, `close-find`.
+/// `find TEXT`, `select X1 Y1 X2 Y2`, `word X Y`, `copy`, `clipboard`, `copy-state`, `type TEXT`.
 fn runScript(_: ?*anyopaque) callconv(.c) c_int {
     const a = shot_app orelse return 1;
     const path = std.c.getenv("RENUX_SCRIPT") orelse return 1;
@@ -4867,9 +4890,12 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
         const rest = std.mem.trim(u8, line[cmd.len..], " ");
         // App actions don't need a pane.
         if (std.mem.eql(u8, cmd, "rex")) {
-            // A Rex action by name, as a key binding would run it: rex pane.go_to
+            // A Rex action, optionally with JSON arguments: rex client.mode.enter {"name":"resize"}
             const name = it.next() orelse continue;
-            if (a.current) |h| _ = App.perform(h, name, null, null);
+            const args_text = std.mem.trim(u8, rest[name.len..], " ");
+            const parsed = if (args_text.len > 0) std.json.parseFromSlice(@import("../util/json.zig").Value, gpa, args_text, .{}) catch continue else null;
+            defer if (parsed) |p| p.deinit();
+            if (a.current) |h| _ = App.perform(h, name, if (parsed) |p| p.value else null, null);
             continue;
         }
         if (std.mem.eql(u8, cmd, "board-keys")) {
@@ -4969,7 +4995,11 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
             continue;
         };
         std.log.info("script: {s}", .{cmd});
-        if (std.mem.eql(u8, cmd, "carry")) {
+        if (std.mem.eql(u8, cmd, "clipboard")) {
+            tv.widget().getClipboard().readTextAsync(null, &scriptClipboard, null);
+        } else if (std.mem.eql(u8, cmd, "copy-state")) {
+            if (tv.copy_mode) |s| std.log.info("copy-state: cursor={d},{d} top={d} kind={s} anchor={any} count={d} search={any} missing={any}", .{ s.mode.cursor.x, s.mode.cursor.y, s.mode.top, @tagName(s.mode.kind), s.mode.anchor, s.mode.count, s.mode.searching, s.mode.not_found }) else std.log.info("copy-state: off", .{});
+        } else if (std.mem.eql(u8, cmd, "carry")) {
             const x = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
             const y = std.fmt.parseFloat(f64, it.next() orelse "0") catch 0;
             ws.simulateCarry(tv.block_id, x, y);

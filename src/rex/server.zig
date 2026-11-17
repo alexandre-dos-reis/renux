@@ -1621,7 +1621,18 @@ pub const Server = struct {
     }
 
     pub fn fetchKeymap(s: *Server) void {
-        s.call("client.keymap", no_args, void, {}, gotKeymap);
+        // The server resolves config keys over client defaults; recorded shortcuts go over both.
+        const enter_key = if (@import("builtin").os.tag == .macos) "shift+cmd+c" else "ctrl+shift+space";
+        s.call("client.keymap", json.Raw{ .text = "{\"defaults\":[{\"name\":\"renux\",\"bindings\":[{\"keys\":[\"" ++ enter_key ++ "\"],\"action\":\"pane.copy_mode.enter\"}]}]}" }, void, {}, gotDefaultKeymap);
+    }
+
+    fn gotDefaultKeymap(s: *Server, extra: *void, r: Result) void {
+        // Older servers reject defaults; the docs do not name its introducing API revision.
+        // The original handler ends a failed retry, rather than retrying again.
+        switch (r) {
+            .ok => gotKeymap(s, extra, r),
+            .err => s.call("client.keymap", no_args, void, {}, gotKeymap),
+        }
     }
 
     fn gotKeymap(s: *Server, _: *void, r: Result) void {
@@ -1872,6 +1883,38 @@ fn freeKeys(map: anytype) void {
 
 fn eql(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+
+test "a failed default keymap retries once even when the legacy request fails" {
+    // A closed control connection reports each attempted call synchronously, without a socket.
+    var c: Control = .{ .socket = undefined, .listener = undefined, .label = undefined, .version = undefined, .token = null, .revision = control.api_revision, .socket_done = true };
+    defer c.pending.deinit(gpa);
+    var bindings = [_]Binding{.{ .keys = &.{"ctrl+a"}, .action = "pane.zoom", .args = null, .lua = false }};
+    var s: Server = .{ .url = undefined, .client_label = undefined, .control = &c, .bindings = &bindings };
+    var extra: void = {};
+    Server.gotDefaultKeymap(&s, &extra, .{ .err = .{ .code = "bad_request", .message = "Unknown field: defaults" } });
+    try std.testing.expectEqual(@as(u64, 2), c.next_id);
+    try std.testing.expectEqual(@as(usize, 0), c.pending.count());
+    try std.testing.expectEqualStrings("pane.zoom", s.bindings[0].action);
+}
+
+test "a successful default keymap is parsed without a legacy retry" {
+    const settings = @import("../settings/settings.zig");
+    const shortcuts = settings.current.shortcuts;
+    settings.current.shortcuts = .empty;
+    defer settings.current.shortcuts = shortcuts;
+    var c: Control = .{ .socket = undefined, .listener = undefined, .label = undefined, .version = undefined, .token = null, .revision = control.api_revision, .socket_done = true };
+    defer c.pending.deinit(gpa);
+    var s: Server = .{ .url = undefined, .client_label = undefined, .control = &c };
+    defer s.keymap_arena.deinit();
+    defer s.overrides_arena.deinit();
+    var parsed = try std.json.parseFromSlice(json.Value, std.testing.allocator, "{\"bindings\":[{\"keys\":[\"ctrl+a\"],\"action\":\"pane.zoom\"}]}", .{});
+    defer parsed.deinit();
+    var extra: void = {};
+    Server.gotDefaultKeymap(&s, &extra, .{ .ok = parsed.value });
+    try std.testing.expectEqual(@as(u64, 1), c.next_id);
+    try std.testing.expectEqual(@as(usize, 1), s.config_bindings.len);
+    try std.testing.expectEqualStrings("pane.zoom", s.config_bindings[0].action);
 }
 
 test "an action request leaves out what isn't set" {

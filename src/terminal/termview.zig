@@ -29,6 +29,7 @@ const fonts = @import("fonts.zig");
 const upload_ui = @import("../ui/upload.zig");
 const peek = @import("../ui/peek.zig");
 const glide_mod = @import("glide.zig");
+const copyview = @import("copyview.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -774,6 +775,7 @@ pub const TermView = struct {
     anchor: [2]u16 = .{ 0, 0 },
     drag_origin: [2]f64 = .{ 0, 0 },
     selecting: bool = false,
+    copy_mode: ?copyview.Session = null,
     /// Whether the press that may start a selection belongs to the program, which takes the mouse.
     drag_to_program: bool = false,
     /// The button held for a program's drag, and the last cell reported, so moves within a cell
@@ -921,6 +923,7 @@ pub const TermView = struct {
     }
 
     pub fn term(v: *TermView) ?*term_mod.Term {
+        if (v.copy_mode) |s| return s.term;
         const st = v.stream() orelse return null;
         return st.term;
     }
@@ -928,7 +931,7 @@ pub const TermView = struct {
     fn changed(ctx: *anyopaque) void {
         const v: *TermView = @ptrCast(@alignCast(ctx));
         if (perf_log and key_at != 0 and echo_at == 0) echo_at = glib.getMonotonicTime();
-        v.widget().queueDraw();
+        if (v.copy_mode == null) v.widget().queueDraw();
         v.updateTitle();
     }
 
@@ -996,6 +999,7 @@ pub const TermView = struct {
 
     fn onDestroy(_: *gtk.Widget, v: *TermView) callconv(.c) void {
         v.im.as(gtk.IMContext).setClientWidget(null);
+        if (v.copy_mode) |s| s.term.destroy();
         upload_ui.unwatch(v);
         peek.closeFor(v.widget());
         if (v.upload_tick != 0) v.widget().removeTickCallback(v.upload_tick);
@@ -1278,6 +1282,10 @@ pub const TermView = struct {
             key_at = glib.getMonotonicTime();
             echo_at = 0;
         }
+        if (v.copy_mode != null) {
+            copyview.key(v, keyval, mods);
+            return 1;
+        }
         // In a Rex key mode, keys run that mode's bindings instead of typing.
         if (key_mode_len > 0) {
             v.modeKey(keyval, mods);
@@ -1394,7 +1402,7 @@ pub const TermView = struct {
 
     /// Runs what a key is bound to. Lua functions and block actions run on the server; pane and
     /// client actions are this app's, as are the session ones Rex leaves to each app.
-    fn runAction(v: *TermView, action: []const u8, args: ?[]const u8, lua: bool) void {
+    pub fn runAction(v: *TermView, action: []const u8, args: ?[]const u8, lua: bool) void {
         const local = !lua and for ([_][]const u8{ "pane.", "client.", "session." }) |prefix| {
             if (std.mem.startsWith(u8, action, prefix)) break true;
         } else false;
@@ -1496,6 +1504,15 @@ pub const TermView = struct {
     /// Text from the input method: plain typing, a composed é, or a word from an input method.
     fn onCommit(_: *gtk.IMContext, text: [*:0]const u8, v: *TermView) callconv(.c) void {
         const t = std.mem.span(text);
+        if (v.copy_mode != null) {
+            const view = std.unicode.Utf8View.init(t) catch return;
+            var cps = view.iterator();
+            while (cps.nextCodepoint()) |cp| {
+                if (v.copy_mode == null) break;
+                copyview.key(v, gdk.unicodeToKeyval(cp), 0);
+            }
+            return;
+        }
         if (key_mode_len > 0) {
             // Letters in a key mode run its bindings, like `l` in resize mode.
             const view = std.unicode.Utf8View.init(t) catch return;
@@ -2565,7 +2582,8 @@ pub const TermView = struct {
         defer gpa.free(text);
         const clipboard = if (primary) v.widget().getPrimaryClipboard() else v.widget().getClipboard();
         clipboard.setText(text.ptr);
-        if (!primary and text.len > 0 and settings.current.copy_animation) v.startCopyAnimation(t);
+        // Keyboard yanks restore another viewport immediately, so there is no text to lift there.
+        if (v.copy_mode == null and !primary and text.len > 0 and settings.current.copy_animation) v.startCopyAnimation(t);
     }
 
     /// The copied text lifts off the pane and a glint runs across it to its far edge, as Rex
@@ -2617,7 +2635,7 @@ pub const TermView = struct {
         if (@abs(v.textAnchor() - v.copy_anchor) > 0.5) v.endCopyAnimation();
     }
 
-    fn endCopyAnimation(v: *TermView) void {
+    pub fn endCopyAnimation(v: *TermView) void {
         if (v.copy_node) |n| n.unref();
         v.copy_node = null;
         v.copy_spans.clearRetainingCapacity();
@@ -2642,6 +2660,7 @@ pub const TermView = struct {
         v.server.clearAttention(v.block_id);
         v.im.as(gtk.IMContext).focusIn();
         v.server.sendFocus(v.session_id, v.block_id, true);
+        if (on_mode_changed) |f| f();
         v.widget().queueDraw();
     }
 
@@ -3485,6 +3504,7 @@ fn placeRow(sn: *gtk.Snapshot, node: ?*gsk.RenderNode, top: f64) void {
 fn renderFrame(v: *TermView, t: *term_mod.Term) void {
     t.honor_hold = settings.current.program_scroll_glide and t.frame.alt_screen;
     _ = t.render(true);
+    if (v.copy_mode != null) t.frame.cursor_visible = false;
     // Where the text is now is known only once the terminal is read, so a lift whose text has
     // moved ends here, before its cells are emptied, not a frame late.
     v.followOutput(t.frame.scroll_total);
@@ -3537,7 +3557,7 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
     const w: f64 = @floatFromInt(v.widget().getWidth());
     const h: f64 = @floatFromInt(v.widget().getHeight());
     const st = v.stream() orelse return snapshotEmpty(v, sn, w, h, "Closed");
-    const t = st.term orelse return snapshotEmpty(v, sn, w, h, switch (st.state) {
+    const t = v.term() orelse return snapshotEmpty(v, sn, w, h, switch (st.state) {
         .closed => "This pane has closed",
         // A pane is nearly always on screen a moment later, so nothing is written meanwhile.
         else => "",
@@ -3621,6 +3641,17 @@ pub fn snapshotTermImpl(v: *TermView, sn: *gtk.Snapshot) void {
         drawGrid(v, sn, t, f, f_font, frac, h);
     }
     if (v.link_armed) v.drawArmedLink(sn, t, frac);
+    if (v.copy_mode) |s| {
+        const p = s.mode.cursor;
+        if (p.y >= f.scroll_offset and p.y < f.scroll_offset + f.rows) {
+            const color = if (cursor_accent != 0) cursor_accent else f.fg;
+            const x = pad_x + @as(f64, @floatFromInt(p.x)) * v.cell_w;
+            const y = pad_y + frac + @as(f64, @floatFromInt(p.y - f.scroll_offset)) * v.cell_h;
+            const width = v.cell_w * @as(f64, if (f.cell(p.x, p.y - @as(usize, @intCast(f.scroll_offset))).flags.wide) 2 else 1);
+            fillRect(sn, color, 0.3, x, y, width, v.cell_h);
+            fillRect(sn, color, 1, x, y + v.cell_h - 2, width, 2);
+        }
+    }
 
     // Search matches, over the text.
     if (t.finding()) {
