@@ -14,8 +14,13 @@
 //! pressed part-way turns it around from where it is. The tabs around the one zoomed out of
 //! land after it, the farthest last. The ring slides from tab to tab on a quicker spring of
 //! its own, and gives a little when a key has nowhere to send it. Names, dots, ring and foot
-//! come in over the second half of the zoom, and a preview fades in over the card or picture
-//! that stood for it.
+//! come in over the second half of the zoom, and a preview fades in over the plain card that
+//! stood for it.
+//!
+//! A frame of the zoom is kept to what costs next to nothing to draw: pictures at another
+//! size, and text at the size it already has. So the tabs land by size alone, with no fade
+//! of their own, and the names, dots and hosts follow their tabs through the zoom at their
+//! own size instead of growing and shrinking with the grid.
 //!
 //! A tab with agents in it carries a small dot for each in its top right corner, in the color
 //! of what that agent is doing, so the grid can be watched in place of the panes.
@@ -1055,7 +1060,9 @@ pub const Overview = struct {
         // A preview that has its place fades in over what stood for it.
         if (!o.animating and !o.gliding) for (o.tiles.items) |*t| {
             if (!t.placed or t.live >= 1) continue;
-            t.live = @min(1, t.live + dt * 1000 / fade_ms);
+            // Over a picture of itself a preview has nothing to fade in from, and takes over
+            // at once; drawing both for a fifth of a second would be work nobody sees.
+            t.live = if (t.picture != null or t.sharp != null) 1 else @min(1, t.live + dt * 1000 / fade_ms);
             busy = true;
             o.widget().queueDraw();
         };
@@ -1237,17 +1244,16 @@ pub const Overview = struct {
         };
     }
 
-    /// How a tab other than the one zoomed out of lands in the grid: smaller and fainter until
-    /// the zoom reaches it, the farthest tab last. `far` is how far the farthest is.
-    const Landing = struct { scale: f64 = 1, alpha: f64 = 1 };
-
-    fn landing(o: *Overview, index: usize, far: f64) Landing {
-        if (index == o.focus or o.zoom >= 1 or o.focus >= o.tiles.items.len) return .{};
+    /// How much of its size a tab other than the one zoomed out of is drawn at: it lands in
+    /// the grid, growing the last of the way, as the zoom reaches it, the farthest tab last.
+    /// `far` is how far the farthest is.
+    fn landing(o: *Overview, index: usize, far: f64) f64 {
+        if (index == o.focus or o.zoom >= 1 or o.focus >= o.tiles.items.len) return 1;
         const from = center(o.tiles.items[o.focus].rect);
         const at = center(o.tiles.items[index].rect);
         const wait = land_wait * std.math.hypot(at[0] - from[0], at[1] - from[1]) / far;
         const q = std.math.clamp((o.zoom - wait) / (1 - wait), 0, 1);
-        return .{ .scale = land_from + (1 - land_from) * q, .alpha = std.math.clamp(q * 1.6, 0, 1) };
+        return land_from + (1 - land_from) * q;
     }
 
     /// A tab as a still: its sharp picture, its picture at the grid's size, or a plain card.
@@ -1275,6 +1281,26 @@ pub const Overview = struct {
         } else o.widget().snapshotChild(t.blank, sn);
     }
 
+    /// Which point of a mark's top edge is held at the place it is drawn.
+    const Hold = enum { left, middle, right };
+
+    /// Draws a name, a tab's dots or its host at a place in the window, at its own size,
+    /// wherever the layout put it.
+    fn drawAt(o: *Overview, sn: *gtk.Snapshot, mark: *gtk.Widget, by: Hold, x: f64, y: f64) void {
+        var b: graphene.Rect = undefined;
+        if (mark.getVisible() == 0 or mark.computeBounds(o.widget(), &b) == 0) return;
+        const wide: f64 = b.f_size.f_width;
+        const left = switch (by) {
+            .left => x,
+            .middle => x - wide / 2,
+            .right => x - wide,
+        };
+        sn.save();
+        sn.translate(&.{ .f_x = @floatCast(left - b.f_origin.f_x), .f_y = @floatCast(y - b.f_origin.f_y) });
+        o.widget().snapshotChild(mark, sn);
+        sn.restore();
+    }
+
     fn draw(o: *Overview, sn: *gtk.Snapshot) void {
         const w = o.widget();
         if (o.size[0] < 1 or o.tiles.items.len == 0) return;
@@ -1286,7 +1312,7 @@ pub const Overview = struct {
             sn.appendColor(&.{ .f_red = 0, .f_green = 0, .f_blue = 0, .f_alpha = @floatCast(0.34 * out) }, &.{ .f_origin = .{ .f_x = 0, .f_y = 0 }, .f_size = .{ .f_width = @floatCast(o.size[0]), .f_height = @floatCast(o.size[1]) } });
         }
         // What belongs to the grid, its names, dots, ring and foot, comes in over the second
-        // half of the zoom: before that it would be drawn many times its size across the tab.
+        // half of the zoom.
         const chrome = smooth((out - 0.5) / 0.5);
         var far: f64 = 1;
         if (o.focus < o.tiles.items.len) {
@@ -1297,9 +1323,9 @@ pub const Overview = struct {
             }
         }
         const v = o.viewRect();
-        const k: f32 = @floatCast(o.size[0] / @max(1, v[2]));
+        const k = o.size[0] / @max(1, v[2]);
         sn.save();
-        sn.scale(k, k);
+        sn.scale(@floatCast(k), @floatCast(k));
         sn.translate(&.{ .f_x = @floatCast(-v[0]), .f_y = @floatCast(-v[1]) });
         // Each session's card lies under its tabs, and fades with the names.
         if (o.groups.items.len > 0 and chrome > 0.01) {
@@ -1309,17 +1335,16 @@ pub const Overview = struct {
         }
         for (o.tiles.items, 0..) |*t, i| {
             const land = o.landing(i, far);
-            const alpha = t.alpha * land.alpha;
-            if (land.scale < 1) {
+            if (land < 1) {
                 sn.save();
-                scaleAbout(sn, center(t.cur), land.scale);
+                scaleAbout(sn, center(t.cur), land);
             }
-            defer if (land.scale < 1) sn.restore();
-            if (alpha < 1) sn.pushOpacity(alpha);
-            defer if (alpha < 1) sn.pop();
-            // At rest a tab is its live preview, once there is one, faded in over what stood
-            // for it. While the zoom runs, and until then, it is a picture, or failing that
-            // a plain card.
+            defer if (land < 1) sn.restore();
+            if (t.alpha < 1) sn.pushOpacity(t.alpha);
+            defer if (t.alpha < 1) sn.pop();
+            // At rest a tab is its live preview, once there is one, faded in over the plain
+            // card that stood for it. While the zoom runs, and until then, it is a picture,
+            // or failing that the card.
             const root = if (!o.animating and !o.gliding and t.placed) t.root else null;
             if (root) |live| {
                 if (t.live >= 1) {
@@ -1346,43 +1371,53 @@ pub const Overview = struct {
                 } else w.snapshotChild(t.blank, sn);
                 sn.pop();
             }
-            // The names rise the last of their way into place as they appear.
-            const rise: graphene.Point = .{ .f_x = 0, .f_y = @floatCast(name_rise * (1 - chrome)) };
-            for (o.tiles.items, 0..) |t, i| {
-                const land = o.landing(i, far);
-                const alpha = t.alpha * land.alpha;
-                if (land.scale < 1) {
-                    sn.save();
-                    scaleAbout(sn, center(t.cur), land.scale);
-                }
-                if (alpha < 1) sn.pushOpacity(alpha);
-                sn.save();
-                sn.translate(&rise);
-                w.snapshotChild(t.label.as(gtk.Widget), sn);
-                sn.restore();
-                inline for (.{ t.badges.as(gtk.Widget), t.host_chip.as(gtk.Widget) }) |mark| {
-                    if (mark.getVisible() != 0) w.snapshotChild(mark, sn);
-                }
-                if (alpha < 1) sn.pop();
-                if (land.scale < 1) sn.restore();
-            }
-            sn.save();
-            sn.translate(&rise);
-            for (o.groups.items) |g| w.snapshotChild(g.label.as(gtk.Widget), sn);
-            sn.restore();
             w.snapshotChild(o.ring, sn);
             sn.pop();
         }
         sn.restore();
-        // The foot comes up from below as it appears.
-        if (chrome > 0.01) {
-            sn.pushOpacity(chrome);
-            sn.save();
-            sn.translate(&.{ .f_x = 0, .f_y = @floatCast(foot_rise * (1 - smooth(out))) });
-            inline for (.{ o.group_button.as(gtk.Widget), o.button.as(gtk.Widget), o.hint.as(gtk.Widget) }) |foot| w.snapshotChild(foot, sn);
-            sn.restore();
-            sn.pop();
+        if (chrome <= 0.01) return;
+        // The names, dots and hosts, and the foot. They are drawn at their own size: text
+        // drawn at a new size every frame has every glyph made again each time, which is
+        // slow. At the grid they are where the layout put them; while the zoom runs each
+        // follows its tab, and the names rise the last of their way into place.
+        sn.pushOpacity(chrome);
+        const rise = name_rise * (1 - chrome);
+        for (o.tiles.items, 0..) |t, i| {
+            if (t.alpha < 1) sn.pushOpacity(t.alpha);
+            defer if (t.alpha < 1) sn.pop();
+            const name = t.label.as(gtk.Widget);
+            const dots = t.badges.as(gtk.Widget);
+            const host = t.host_chip.as(gtk.Widget);
+            if (!o.animating) {
+                inline for (.{ name, dots, host }) |mark| {
+                    if (mark.getVisible() != 0) w.snapshotChild(mark, sn);
+                }
+                continue;
+            }
+            // Where the tab's panes are in the window now.
+            const c = o.contentRect(shrunk(t.cur, o.landing(i, far)));
+            const left = (c[0] - v[0]) * k;
+            const right = (c[0] + c[2] - v[0]) * k;
+            const top = (c[1] - v[1]) * k;
+            const bottom = (c[1] + c[3] - v[1]) * k;
+            o.drawAt(sn, name, .middle, (left + right) / 2, bottom + 10 + rise);
+            o.drawAt(sn, dots, .right, right - 8, top + 8);
+            o.drawAt(sn, host, .left, left + 8, top + 8);
         }
+        for (o.groups.items) |g| {
+            const name = g.label.as(gtk.Widget);
+            if (!o.animating) {
+                w.snapshotChild(name, sn);
+                continue;
+            }
+            o.drawAt(sn, name, .middle, (g.rect[0] + g.rect[2] / 2 - v[0]) * k, (g.rect[1] + g.rect[3] - v[1]) * k + 10 + rise);
+        }
+        // The foot comes up from below as it appears.
+        sn.save();
+        sn.translate(&.{ .f_x = 0, .f_y = @floatCast(foot_rise * (1 - smooth(out))) });
+        inline for (.{ o.group_button.as(gtk.Widget), o.button.as(gtk.Widget), o.hint.as(gtk.Widget) }) |foot| w.snapshotChild(foot, sn);
+        sn.restore();
+        sn.pop();
     }
 };
 
