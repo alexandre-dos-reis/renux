@@ -36,6 +36,12 @@ and please report them as [issues](https://github.com/zenodea/renux/issues).
   Ctrl to underline a detected path; Esc closes the peek. For paths with ambiguous spacing,
   select the path and choose **Preview Selected Path** from the right-click menu, which
   offers **Open With…** for other formats. Requires Rex API 13; files up to 16 MiB.
+- **Remote development links.** Ctrl+click an HTTP(S) localhost link with a port in a remote
+  pane: Renux forwards it to a free port on this computer and opens the same path and query in
+  your browser. Repeated clicks reuse the forward. **Forward Port…** in Commands discovers
+  the focused pane's listening ports, accepts a port or `host:port`, and shows the forwards
+  this window carries, with a close button for each. Requires a Rex CLI/server with port
+  forwarding; port discovery needs Rex API 15. Local panes keep opening links directly.
 - **Several servers.** Connect to more than one Rex server, on this computer or over Tailscale,
   and be told when one could be updated. Remote hosts can answer to this computer's keys and
   keep their own colors.
@@ -99,6 +105,12 @@ goes to it, and `s` groups the tabs by session.
 A remote host answers to its own Rex config. For the same keys everywhere, turn on
 Settings > Remote Hosts > Use this computer's keys on remote hosts.
 
+Ctrl+click remote links to `localhost`, `127.0.0.1`, `[::1]` or `0.0.0.0` with an explicit
+port to forward and open them. Bind `client.host.forward_port` in your Rex config, or choose
+**Forward Port…** in Commands, to discover ports, enter a target, or close a forward.
+Forwards listen only on `127.0.0.1` and close when this Renux window quits or the host is removed.
+See [port forwarding](docs/port-forwarding.md) for requirements and limitations.
+
 ## Building
 
 You need Zig 0.17, GTK 4, libadwaita, librsvg and poppler-glib, with their development files.
@@ -117,6 +129,8 @@ test script and the frame log.
 `zig build test-clipboard` also exercises the GTK paste handler on a private display, including
 images and Ctrl+V; it additionally needs `gtk4-broadwayd` and never changes your clipboard.
 `zig build test-preview` uses the same isolated setup to check downloads and preview dialogs.
+`zig build test-forward` checks TCP forwarding, URL rewriting, reuse and cleanup against a
+private Rex server and HTTP target. It needs `rex`, `curl` and Python 3, but no display.
 
 ## License
 

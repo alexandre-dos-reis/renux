@@ -83,6 +83,7 @@ pub fn main(init: std.process.Init) !void {
     if (@import("builtin").os.tag == .macos and std.c.getenv("RENUX_NOFOCUS") != null) @import("platform/macos.zig").neverActivate();
     const app = try App.create();
     const code = app.run();
+    @import("rex/forward.zig").shutdown();
     // A setting changed in the last second is still waiting to be written.
     @import("settings/settings.zig").flush();
     releaseToggle();
@@ -100,6 +101,8 @@ test {
     _ = @import("rex/updates.zig");
     _ = @import("rex/upload.zig");
     _ = @import("rex/download.zig");
+    _ = @import("rex/forward.zig");
+    _ = @import("ui/ports.zig");
     _ = @import("terminal/paths.zig");
     _ = @import("ui/preview.zig");
     _ = @import("ui/peek.zig");

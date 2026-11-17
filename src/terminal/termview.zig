@@ -2505,6 +2505,8 @@ pub const TermView = struct {
             if (std.ascii.eqlIgnoreCase(t, scheme)) break true;
         } else false;
         const root: ?*gtk.Window = @ptrCast(@alignCast(v.widget().getRoot()));
+        const forward = @import("../rex/forward.zig");
+        if (forward.remoteLink(v.server.url, url)) return forward.open(v.server, v.session_id, url, root);
         if (plain or trusted) return launchUri(url.ptr, root);
         const body = std.fmt.allocPrintSentinel(gpa, "{s}", .{url}, 0) catch return;
         defer gpa.free(body);
