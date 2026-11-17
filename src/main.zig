@@ -103,6 +103,7 @@ test {
     _ = @import("terminal/paths.zig");
     _ = @import("ui/preview.zig");
     _ = @import("ui/peek.zig");
+    _ = @import("ui/pdf.zig");
     _ = @import("ui/highlight.zig");
     _ = @import("terminal/keys.zig");
     _ = @import("terminal/termview.zig");

@@ -1,8 +1,10 @@
 //! A small look at a file named in a pane, shown by its path: what the file is, the lines
-//! around the one named, or a picture. Enter opens the file in an editor in a new pane to
-//! the right, and Shift+Enter in a new window. A picture goes to the desktop's own viewer.
+//! around the one named, a picture, or a PDF's first page. Enter opens the file in an editor
+//! in a new pane to the right, and Shift+Enter in a new window. A picture or a PDF goes to
+//! the desktop's own viewer.
 const std = @import("std");
 const gtk = @import("gtk");
+const adw = @import("adw");
 const gio = @import("gio");
 const glib = @import("glib");
 const gdk = @import("gdk");
@@ -10,6 +12,7 @@ const gobject = @import("gobject");
 const cairo = @import("cairo");
 const download = @import("../rex/download.zig");
 const preview = @import("preview.zig");
+const pdf = @import("pdf.zig");
 const highlight = @import("highlight.zig");
 const programs = @import("../icons/programs.zig");
 const table = @import("../icons/program_icons.zig");
@@ -23,11 +26,15 @@ const gpa = std.heap.c_allocator;
 const shown_lines = 13;
 /// The peek on screen, or about to be. A second one takes its place.
 var open: ?*Peek = null;
+/// The peek on its way out, on screen while it fades. One at a time.
+var closing: ?*Peek = null;
+/// How long the way out takes, in milliseconds; `peek-out` in the app's CSS runs as long.
+const leave_ms = 200;
 
 /// Shows the peek by `at`, a place in `parent`. `target` is a path as the pane wrote it, with
 /// `:LINE` after it when the pane named a line.
 pub fn show(parent: *gtk.Widget, at: gdk.Rectangle, server: *Server, sid: []const u8, bid: []const u8, target: []const u8) void {
-    if (open) |old| old.leave();
+    if (open) |old| old.dismiss();
     const where = split(target);
     if (where.path.len == 0) return;
     const p = Peek.create(parent, at, server, sid, bid, where.path, where.line) catch return;
@@ -43,14 +50,13 @@ pub fn show(parent: *gtk.Widget, at: gdk.Rectangle, server: *Server, sid: []cons
 
 /// Takes down the peek of a widget that is going away.
 pub fn closeFor(parent: *gtk.Widget) void {
-    const p = open orelse return;
-    if (p.parent != parent) return;
-    p.leave();
+    if (open) |p| if (p.parent == parent) p.leave();
+    if (closing) |p| if (p.parent == parent) p.leave();
 }
 
 /// The peek's own window while it is on screen, for the development script's pictures.
 pub fn visible() ?*gtk.Widget {
-    const p = open orelse return null;
+    const p = open orelse closing orelse return null;
     const w = p.pop.as(gtk.Widget);
     return if (w.getMapped() != 0) w else null;
 }
@@ -58,6 +64,7 @@ pub fn visible() ?*gtk.Widget {
 /// Presses one of the peek's keys, by name; for the development script.
 pub fn press(key: []const u8) void {
     const p = open orelse return;
+    if (std.mem.eql(u8, key, "escape")) return p.dismiss();
     p.run(if (std.mem.eql(u8, key, "shift-enter")) .window else .beside);
 }
 
@@ -68,7 +75,7 @@ pub fn split(target: []const u8) struct { path: []const u8, line: ?u32 } {
     return .{ .path = target[0..colon], .line = if (line == 0) null else line };
 }
 
-const Kind = enum { loading, text, image, other, failed };
+const Kind = enum { loading, text, image, pdf, other, failed };
 /// Where the editor goes: a new pane to the right of this one, or a new window.
 const How = enum { beside, window };
 
@@ -86,6 +93,8 @@ const Peek = struct {
     /// GTK closes a popover whose size changes while it is open.
     body: *gtk.Overlay,
     shown: ?*gtk.Widget = null,
+    /// The path under "Loading from", while that is what the peek shows.
+    where: ?*gtk.Label = null,
     meta: *gtk.Label,
     primary: *gtk.Button,
     primary_label: *gtk.Label,
@@ -93,14 +102,24 @@ const Peek = struct {
     transfer: ?*download.Download = null,
     data: ?*glib.Bytes = null,
     texture: ?*gdk.Texture = null,
+    /// How many pages a PDF has; the picture is of its first.
+    pages: u32 = 0,
     kind: Kind = .loading,
     /// A key pressed before Rex had said where the file is, kept until it has.
     waiting: ?How = null,
     /// Runs out when the file is slow to arrive, and the peek opens without it.
+    /// Then, once the peek is closing, runs out when it has faded.
     timer: c_uint = 0,
     popped: bool = false,
     refs: usize = 1,
+    /// No longer the peek, though it may still be fading on screen.
     gone: bool = false,
+    /// Taken off its parent.
+    removed: bool = false,
+    /// The window the peek is in while it listens there for what closes it.
+    root: ?*gtk.Widget = null,
+    outside: ?*gtk.GestureClick = null,
+    window_changed: c_ulong = 0,
 
     fn create(parent: *gtk.Widget, at: gdk.Rectangle, server: *Server, sid: []const u8, bid: []const u8, path: []const u8, line: ?u32) !*Peek {
         const p = try gpa.create(Peek);
@@ -159,6 +178,9 @@ const Peek = struct {
         pop.setPosition(.bottom);
         pop.setHasArrow(0);
         pop.setOffset(0, 4);
+        // GTK would close it for a click anywhere else, but at once, with no time to fade.
+        // The peek closes itself instead: see `watch`.
+        pop.setAutohide(0);
         // Ours to keep until the popover has been taken off its parent.
         _ = pop.as(gobject.Object).ref();
 
@@ -171,7 +193,7 @@ const Peek = struct {
         keys.as(gtk.EventController).setPropagationPhase(.capture);
         _ = gtk.EventControllerKey.signals.key_pressed.connect(keys, *Peek, &onKey, p, .{});
         pop.as(gtk.Widget).addController(keys.as(gtk.EventController));
-        p.setBody(message("Loading…"));
+        p.showLoading();
         p.refresh();
         return p;
     }
@@ -196,6 +218,56 @@ const Peek = struct {
         if (p.popped or p.gone) return;
         p.popped = true;
         p.pop.popup();
+        // Its keys come by way of whatever in it has the keyboard.
+        _ = p.pop.as(gtk.Widget).childFocus(.tab_forward);
+        p.watch();
+    }
+
+    /// Listens for what closes the peek: a click anywhere outside it, or its window being
+    /// left for another.
+    fn watch(p: *Peek) void {
+        const root = (p.parent.getRoot() orelse return).as(gtk.Widget);
+        _ = root.as(gobject.Object).ref();
+        p.root = root;
+        const click = gtk.GestureClick.new();
+        click.as(gtk.GestureSingle).setButton(0);
+        click.as(gtk.EventController).setPropagationPhase(.capture);
+        _ = gtk.GestureClick.signals.pressed.connect(click, *Peek, &pressedOutside, p, .{});
+        root.addController(click.as(gtk.EventController));
+        p.outside = click;
+        p.window_changed = gobject.Object.signals.notify.connect(root.as(gobject.Object), *Peek, &windowChanged, p, .{ .detail = "is-active" });
+    }
+
+    fn unwatch(p: *Peek) void {
+        const root = p.root orelse return;
+        p.root = null;
+        if (p.outside) |click| root.removeController(click.as(gtk.EventController));
+        p.outside = null;
+        gobject.signalHandlerDisconnect(root.as(gobject.Object), p.window_changed);
+        root.as(gobject.Object).unref();
+    }
+
+    fn pressedOutside(click: *gtk.GestureClick, _: c_int, _: f64, _: f64, p: *Peek) callconv(.c) void {
+        // A click in the peek comes by way of the window too.
+        const event = click.as(gtk.EventController).getCurrentEvent() orelse return;
+        if (event.getSurface() == p.pop.as(gtk.Native).getSurface()) return;
+        // The click that closes the peek does nothing else, as with any popover.
+        _ = click.as(gtk.Gesture).setState(.claimed);
+        // Closing stops the listening, which can't be done from inside what is heard.
+        p.refs += 1;
+        _ = glib.idleAdd(&dismissLater, p);
+    }
+
+    fn dismissLater(data: ?*anyopaque) callconv(.c) c_int {
+        const p: *Peek = @ptrCast(@alignCast(data.?));
+        defer p.unref();
+        p.dismiss();
+        return 0;
+    }
+
+    fn windowChanged(_: *gobject.Object, _: *gobject.ParamSpec, p: *Peek) callconv(.c) void {
+        const window: *gtk.Window = @ptrCast(@alignCast(p.root orelse return));
+        if (window.isActive() == 0) p.dismiss();
     }
 
     fn waited(data: ?*anyopaque) callconv(.c) c_int {
@@ -205,14 +277,53 @@ const Peek = struct {
         return 0;
     }
 
-    /// Off the screen and off its parent, which may itself be going away.
+    /// Off the screen the way it came, in reverse: it shrinks a little and fades, then goes.
+    fn dismiss(p: *Peek) void {
+        if (p.gone) return;
+        const w = p.pop.as(gtk.Widget);
+        // The pane has the keyboard back now, not when the fade is over.
+        if (p.parent.getRoot()) |root| if (root.getFocus()) |focus| {
+            if (focus.isAncestor(w) != 0) _ = p.parent.grabFocus();
+        };
+        if (!p.popped or w.getMapped() == 0 or adw.getEnableAnimations(w) == 0) return p.leave();
+        p.stop();
+        if (closing) |old| old.remove();
+        closing = p;
+        w.setCanTarget(0);
+        w.addCssClass("leaving");
+        p.timer = glib.timeoutAdd(leave_ms, &faded, p);
+    }
+
+    fn faded(data: ?*anyopaque) callconv(.c) c_int {
+        const p: *Peek = @ptrCast(@alignCast(data.?));
+        p.timer = 0;
+        p.remove();
+        return 0;
+    }
+
+    /// Off the screen and off its parent at once; the parent may itself be going away.
     fn leave(p: *Peek) void {
+        p.stop();
+        p.remove();
+    }
+
+    /// No longer the peek: nothing more arrives for it, and nothing more closes it.
+    fn stop(p: *Peek) void {
         if (p.gone) return;
         p.gone = true;
         if (open == p) open = null;
         if (p.timer != 0) _ = glib.Source.remove(p.timer);
         p.timer = 0;
         if (p.transfer) |d| d.cancel();
+        p.unwatch();
+    }
+
+    fn remove(p: *Peek) void {
+        if (p.removed) return;
+        p.removed = true;
+        if (closing == p) closing = null;
+        if (p.timer != 0) _ = glib.Source.remove(p.timer);
+        p.timer = 0;
         p.pop.as(gtk.Widget).unparent();
         // GTK is still using the popover while it says the popover has closed, so the last
         // hold on it is let go of afterwards.
@@ -234,10 +345,20 @@ const Peek = struct {
     fn edits(p: *const Peek) bool {
         return switch (p.kind) {
             .text => true,
-            .image, .other => false,
-            .loading => !looksLikeImage(p.path),
+            .image, .pdf, .other => false,
+            .loading => !looksLikeImage(p.path) and !looksLikePdf(p.path),
             // Too big to show here is still a file an editor can open.
             .failed => p.resolved != null,
+        };
+    }
+
+    /// Whether the file is one the desktop has a viewer of its own for: a picture or a PDF.
+    /// Until the file has arrived its name decides.
+    fn viewed(p: *const Peek) bool {
+        return switch (p.kind) {
+            .image, .pdf => true,
+            .loading => looksLikeImage(p.path) or looksLikePdf(p.path),
+            else => false,
         };
     }
 
@@ -246,8 +367,7 @@ const Peek = struct {
         const missing = p.kind == .failed and p.resolved == null;
         const editing = p.edits();
         var buf: [96]u8 = undefined;
-        const picture = p.kind == .image or (p.kind == .loading and looksLikeImage(p.path));
-        const text: [:0]const u8 = if (editing) std.fmt.bufPrintSentinel(&buf, "Open in {s}", .{editorName()}, 0) catch "Open in Editor" else if (picture) "Open" else "Open With…";
+        const text: [:0]const u8 = if (editing) std.fmt.bufPrintSentinel(&buf, "Open in {s}", .{editorName()}, 0) catch "Open in Editor" else if (p.viewed()) "Open" else "Open With…";
         p.primary_label.setText(text.ptr);
         p.primary.as(gtk.Widget).setSensitive(@intFromBool(!missing));
         offer(p.second, editing);
@@ -256,6 +376,11 @@ const Peek = struct {
     fn located(ctx: *anyopaque, path: []const u8) void {
         const p: *Peek = @ptrCast(@alignCast(ctx));
         if (p.resolved == null) p.resolved = gpa.dupe(u8, path) catch null;
+        // The whole path takes the place of the one the pane wrote.
+        if (p.where) |where| if (gpa.dupeSentinel(u8, path, 0)) |z| {
+            defer gpa.free(z);
+            where.setText(z.ptr);
+        } else |_| {};
         p.resumeLater();
     }
 
@@ -276,19 +401,12 @@ const Peek = struct {
         const data = bytes orelse return p.fail(detail);
         var buf: [32]u8 = undefined;
         p.meta.setText(sizeText(&buf, data.len).ptr);
-        // Kept for the worker that decodes a picture, and for the copy another app is given.
+        // Kept for the worker that draws a picture, and for the copy another app is given.
         p.data = glib.Bytes.new(data.ptr, data.len);
         if (preview.imageSize(data)) |size| {
-            if (size[0] > 0 and size[1] > 0 and size[0] <= 16384 and size[1] <= 16384 and @as(u64, size[0]) * size[1] <= 32 * 1024 * 1024) {
-                // Decoding a large picture takes a moment, which a worker spends instead.
-                p.refs += 1;
-                const task = gio.Task.new(p.pop.as(gobject.Object), null, &decoded, p);
-                task.setTaskData(p, null);
-                task.runInThread(&decode);
-                task.unref();
-                return;
-            }
+            if (size[0] > 0 and size[1] > 0 and size[0] <= 16384 and size[1] <= 16384 and @as(u64, size[0]) * size[1] <= 32 * 1024 * 1024) return p.draw(.image);
         }
+        if (pdf.supported and pdf.isPdf(data)) return p.draw(.pdf);
         if (preview.isText(data)) {
             p.kind = .text;
             p.showLines(data);
@@ -300,9 +418,26 @@ const Peek = struct {
         p.present();
     }
 
+    /// Decoding a large picture or drawing a page takes a moment, which a worker spends
+    /// instead. The peek goes on saying it is loading until the worker is done.
+    fn draw(p: *Peek, kind: Kind) void {
+        p.kind = kind;
+        p.refs += 1;
+        const task = gio.Task.new(p.pop.as(gobject.Object), null, &decoded, p);
+        task.setTaskData(p, null);
+        task.runInThread(&decode);
+        task.unref();
+    }
+
     fn decode(task: *gio.Task, _: *gobject.Object, ctx: ?*anyopaque, _: ?*gio.Cancellable) callconv(.c) void {
         const p: *Peek = @ptrCast(@alignCast(ctx.?));
-        p.texture = gdk.Texture.newFromBytes(p.data.?, null);
+        if (p.kind == .pdf) {
+            // Twice the room the peek has, so the page is sharp on a dense screen.
+            if (pdf.firstPage(p.data.?, 1600, 1200)) |page| {
+                p.texture = page.texture;
+                p.pages = page.pages;
+            }
+        } else p.texture = gdk.Texture.newFromBytes(p.data.?, null);
         task.returnBoolean(1);
     }
 
@@ -312,19 +447,23 @@ const Peek = struct {
         _ = @as(*gio.Task, @ptrCast(result)).propagateBoolean(null);
         if (p.gone) return;
         if (p.texture) |texture| {
-            p.kind = .image;
             const picture = gtk.Picture.newForPaintable(texture.as(gdk.Paintable));
             picture.setCanShrink(1);
             picture.setContentFit(.contain);
             picture.as(gtk.Widget).addCssClass("peek-picture");
             var buf: [64]u8 = undefined;
             var size: [32]u8 = undefined;
-            const text = std.fmt.bufPrintSentinel(&buf, "{d} × {d} · {s}", .{ texture.getWidth(), texture.getHeight(), sizeText(&size, p.data.?.getSize()) }, 0) catch "";
+            const bytes = sizeText(&size, p.data.?.getSize());
+            const text = if (p.kind == .pdf)
+                std.fmt.bufPrintSentinel(&buf, "{d} {s} · {s}", .{ p.pages, if (p.pages == 1) "page" else "pages", bytes }, 0) catch ""
+            else
+                std.fmt.bufPrintSentinel(&buf, "{d} × {d} · {s}", .{ texture.getWidth(), texture.getHeight(), bytes }, 0) catch "";
             p.meta.setText(text.ptr);
             p.setBody(picture.as(gtk.Widget));
         } else {
+            const what: []const u8 = if (p.kind == .pdf) "This PDF couldn't be read" else "This picture couldn't be read";
             p.kind = .other;
-            p.setBody(message("This picture couldn't be read"));
+            p.setBody(message(what));
         }
         p.refresh();
         p.present();
@@ -342,8 +481,33 @@ const Peek = struct {
 
     fn setBody(p: *Peek, child: *gtk.Widget) void {
         if (p.shown) |old| p.body.removeOverlay(old);
+        p.where = null;
         p.shown = child;
+        // What arrives while the peek is on screen fades in over what was there.
+        if (p.popped) child.addCssClass("peek-arrived");
         p.body.addOverlay(child);
+    }
+
+    /// Until the file is here the peek says where it is coming from: the host, and the path
+    /// there, which is the pane's own until Rex has said where the file is.
+    fn showLoading(p: *Peek) void {
+        const box = gtk.Box.new(.vertical, 6);
+        box.as(gtk.Widget).setHalign(.center);
+        box.as(gtk.Widget).setValign(.center);
+        const row = gtk.Box.new(.horizontal, 10);
+        row.as(gtk.Widget).setHalign(.center);
+        row.append(adw.Spinner.new().as(gtk.Widget));
+        var buf: [200]u8 = undefined;
+        const text: [:0]const u8 = std.fmt.bufPrintSentinel(&buf, "Loading from {s}", .{hostLabel(p.server.url)}, 0) catch "Loading…";
+        row.append(gtk.Label.new(text.ptr).as(gtk.Widget));
+        box.append(row.as(gtk.Widget));
+        const where = label(p.path, "peek-path");
+        where.setXalign(0.5);
+        where.setEllipsize(.middle);
+        where.setMaxWidthChars(64);
+        box.append(where.as(gtk.Widget));
+        p.setBody(box.as(gtk.Widget));
+        p.where = where;
     }
 
     /// The named line with the lines around it, or the file's first ones.
@@ -408,6 +572,7 @@ const Peek = struct {
         const shift = bits & 1 != 0;
         switch (keyval) {
             0xff0d, 0xff8d, 0xfe34 => p.run(if (shift) .window else .beside),
+            0xff1b => p.dismiss(),
             else => return 0,
         }
         return 1;
@@ -434,7 +599,7 @@ const Peek = struct {
         defer p.unref();
         const parent = p.parent;
         if (editing) p.edit(how) else p.openOutside();
-        if (p.popped) p.pop.popdown() else p.leave();
+        p.dismiss();
         if (!editing) return;
         // The new pane takes the keyboard; until it is there the old one keeps it.
         _ = parent.grabFocus();
@@ -469,8 +634,7 @@ const Peek = struct {
         defer file.unref();
         const launcher = gtk.FileLauncher.new(file);
         defer launcher.unref();
-        const picture = p.kind == .image or (p.kind == .loading and looksLikeImage(p.path));
-        launcher.setAlwaysAsk(@intFromBool(!picture));
+        launcher.setAlwaysAsk(@intFromBool(!p.viewed()));
         const window: ?*gtk.Window = if (p.parent.getRoot()) |root| @ptrCast(@alignCast(root)) else null;
         launcher.launch(window, null, null, null);
     }
@@ -527,6 +691,12 @@ fn label(text: []const u8, class: [:0]const u8) *gtk.Label {
     l.setXalign(0);
     l.as(gtk.Widget).addCssClass(class.ptr);
     return l;
+}
+
+/// The name the person gave a host, or one made from its address.
+fn hostLabel(url: []const u8) []const u8 {
+    for (settings.current.hosts.items) |h| if (std.mem.eql(u8, h.url, url)) return h.label;
+    return settings.labelFor(url);
 }
 
 fn message(text: []const u8) *gtk.Widget {
@@ -670,6 +840,10 @@ fn looksLikeImage(path: []const u8) bool {
         if (std.ascii.eqlIgnoreCase(path[dot + 1 ..], ext)) return true;
     }
     return false;
+}
+
+fn looksLikePdf(path: []const u8) bool {
+    return pdf.supported and std.ascii.endsWithIgnoreCase(path, ".pdf");
 }
 
 /// The editor as the button names it: the command's first word, without its folder.

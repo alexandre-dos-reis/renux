@@ -4,11 +4,11 @@
 
 - Ctrl+hover underlines detected paths; Ctrl+click shows a peek by the path: the file's name
   with its language's icon, its size, and thirteen lines with the named one in the middle, or a
-  picture as tall as those lines. Web URLs still open the browser. OSC 8 `file://` links peek at files on the
+  picture or the first page of a PDF as tall as those lines. Web URLs still open the browser. OSC 8 `file://` links peek at files on the
   pane's host. The context menu's **Preview Selected Path** still opens the full preview.
 - In the peek, Enter opens a text file in an editor in a new pane to the right of the pane
-  that named it, and Shift+Enter in a new window. A picture goes to the desktop's own
-  app for pictures, and a file with no peek to its list of apps. A file on this computer is
+  that named it, and Shift+Enter in a new window. A picture or a PDF goes to the desktop's own
+  app for it, and a file with no peek to its list of apps. A file on this computer is
   opened where it is; one on another host as a private copy under its own name. The editor is started by typing the **Editor command** setting
   (`nvim +{line} {path}` by default) at the new pane's shell, so on a remote pane it runs on
   that host and nothing is downloaded for it. The command gets the file's whole path, which
@@ -24,6 +24,17 @@
 - The peek keeps one size from the moment it opens. GTK closes a popover whose size changes
   while it is open, which a first version did as soon as the file arrived. It opens once the
   file is in it, or after 120 ms without it, so a nearby file never shows as "Loading".
+- A file that is slow to arrive shows a spinner, "Loading from" and the host's name, and the
+  path under it: the pane's own until Rex has said where the file is. The file fades in when
+  it arrives.
+- The peek opens the way a new pane's card does, growing a little as it fades in, and closes
+  the same way backwards. GTK's own closing of a popover for a click elsewhere is at once, with
+  no time to fade, so the peek closes itself: on Escape, a click outside it, or its window
+  being left for another.
+- A PDF's first page is drawn by Poppler (`poppler-glib`) on a worker, with the number of pages
+  beside the size. One that can't be read, such as one that wants a password, offers
+  **Open With…**. Not on a Mac, where Poppler isn't linked; the full preview dialog doesn't
+  show PDFs either.
 - Path detection supports absolute/relative paths, `~`, filename extensions, quoted spaces,
   soft wraps, and `path:line:column`, whose line the peek and the editor go to. Selection → **Preview Selected Path** is the fallback.
   Unquoted paths containing spaces remain ambiguous; extensionless bare names need selection.
@@ -157,7 +168,7 @@ but no examined official source proves that this is Rex.app's actual pipeline.
    not a Quick Look equivalent by itself. Never execute a remote filename through
    a shell or automatically launch executable/active content.
 
-Defer PDFs/media breadth, custom preview plugins, automatic remote downloads and
+Defer PDFs beyond the peek's first page, media breadth, custom preview plugins, automatic remote downloads and
 persistent caches until transport completion/error semantics have been validated.
 The implementation keeps downloads separate from upload completion/paste behavior.
 

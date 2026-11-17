@@ -80,13 +80,21 @@ const css =
     \\.divider-line { border-radius: 99px; background-color: alpha(@accent_bg_color, 0.85); opacity: 0; transition: opacity 140ms ease-out; }
     \\.divider-line.shown { opacity: 1; transition: opacity 90ms ease-out 60ms; }
     \\.drop-target { background-color: alpha(@accent_bg_color, 0.16); border: 1.5px solid alpha(@accent_bg_color, 0.8); border-radius: 9px; color: @accent_color; }
-    \\.peek > contents { padding: 12px; border-radius: 16px; }
+    \\.peek > contents { padding: 12px; border-radius: 16px; animation: peek-in 400ms linear; }
+    \\.peek.leaving > contents { animation: peek-out 200ms linear forwards; }
+    \\/* Opens the way a new pane's card does: from a little smaller, on the same spring, fading in.
+    \\   It closes the same way backwards, less the last stretch of the spring, where nothing can be seen to move. */
+    \\@keyframes peek-in { 0% { opacity: 0; transform: scale(0.92); } 12.5% { opacity: 0.5; transform: scale(0.941); } 25% { opacity: 0.75; transform: scale(0.968); } 37.5% { opacity: 0.88; transform: scale(0.984); } 50% { opacity: 0.94; transform: scale(0.993); } 75% { opacity: 0.985; transform: scale(0.999); } 100% { opacity: 1; transform: none; } }
+    \\@keyframes peek-out { 0% { opacity: 1; transform: none; } 25% { opacity: 0.88; transform: scale(0.984); } 50% { opacity: 0.75; transform: scale(0.968); } 75% { opacity: 0.5; transform: scale(0.941); } 100% { opacity: 0; transform: scale(0.92); } }
     \\.peek-head { padding: 2px 4px 0 4px; }
     \\.peek-body { background-color: @view_bg_color; border-radius: 10px; }
     \\.peek-rows { padding: 8px 0; }
     \\.peek-row { padding: 2px 16px 2px 2px; }
     \\.peek-row.peek-target { background-color: alpha(@accent_bg_color, 0.18); }
     \\.peek-message { padding: 0 18px; }
+    \\.peek-path { font-family: monospace; font-size: 0.85em; color: @renux_secondary; padding: 0 18px; }
+    \\.peek-arrived { animation: peek-arrived 200ms ease-out; }
+    \\@keyframes peek-arrived { from { opacity: 0; } to { opacity: 1; } }
     \\.peek-picture { margin: 10px; }
     \\.peek button { padding: 5px 7px 5px 14px; border-radius: 9px; }
     \\.peek-key { font-family: monospace; font-size: 0.8em; padding: 2px 7px; border-radius: 6px; background-color: alpha(currentColor, 0.14); }
@@ -4995,7 +5003,7 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
         } else if (std.mem.eql(u8, cmd, "drop")) {
             ws.simulateDrop();
         } else if (std.mem.eql(u8, cmd, "peek-key")) {
-            // A key in the file peek that is open: peek-key enter | shift-enter
+            // A key in the file peek that is open: peek-key enter | shift-enter | escape
             @import("../ui/peek.zig").press(rest);
         } else if (std.mem.eql(u8, cmd, "open-link")) {
             // Ctrl+click on the link at a cell: open-link COL ROW
