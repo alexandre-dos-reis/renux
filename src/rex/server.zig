@@ -1593,7 +1593,9 @@ pub const Server = struct {
     }
 
     pub fn fetchKeymap(s: *Server) void {
-        s.call("client.keymap", no_args, void, {}, gotKeymap);
+        // The server resolves config keys over client defaults; recorded shortcuts go over both.
+        const enter_key = if (@import("builtin").os.tag == .macos) "shift+cmd+c" else "ctrl+shift+space";
+        s.call("client.keymap", json.Raw{ .text = "{\"defaults\":[{\"name\":\"renux\",\"bindings\":[{\"keys\":[\"" ++ enter_key ++ "\"],\"action\":\"pane.copy_mode.enter\"}]}]}" }, void, {}, gotKeymap);
     }
 
     fn gotKeymap(s: *Server, _: *void, r: Result) void {

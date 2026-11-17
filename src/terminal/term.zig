@@ -290,6 +290,63 @@ pub const Term = struct {
         return buf[0..n];
     }
 
+    /// Copy mode reads a private snapshot, so incoming output and history eviction cannot move
+    /// its cursor or selection. The live terminal and its program keep running.
+    pub fn freeze(self: *Term) ?*Term {
+        var bytes: [*c]u8 = null;
+        var len: usize = 0;
+        if (c.ghostty_snapshot_encode_alloc(self.term, null, &bytes, &len) != c.GHOSTTY_SUCCESS or bytes == null) return null;
+        defer c.ghostty_free(null, bytes, len);
+        const frozen = Term.fromSnapshot(bytes[0..len]) orelse return null;
+        _ = frozen.render(true);
+        return frozen;
+    }
+
+    pub fn copyGrid(self: *Term) @import("copymode.zig").Grid {
+        return .{ .ctx = self, .cols = self.frame.cols, .rows = @intCast(self.frame.scroll_total), .read = copyCell, .wrapped = copyWrapped };
+    }
+
+    fn screenRef(self: *Term, p: @import("copymode.zig").Point, ref: *c.GhosttyGridRef) bool {
+        var point = std.mem.zeroes(c.GhosttyPoint);
+        point.tag = c.GHOSTTY_POINT_TAG_SCREEN;
+        point.value.coordinate = .{ .x = @intCast(p.x), .y = @intCast(p.y) };
+        ref.* = std.mem.zeroes(c.GhosttyGridRef);
+        return c.ghostty_terminal_grid_ref(self.term, point, ref) == c.GHOSTTY_SUCCESS;
+    }
+
+    fn copyCell(ctx: *anyopaque, p: @import("copymode.zig").Point) @import("copymode.zig").Cell {
+        const self: *Term = @ptrCast(@alignCast(ctx));
+        var ref: c.GhosttyGridRef = undefined;
+        var raw: c.GhosttyCell = 0;
+        if (!self.screenRef(p, &ref) or c.ghostty_grid_ref_cell(&ref, &raw) != c.GHOSTTY_SUCCESS) return .{};
+        var cp: u32 = 0;
+        var wide: c.GhosttyCellWide = c.GHOSTTY_CELL_WIDE_NARROW;
+        _ = c.ghostty_cell_get(raw, c.GHOSTTY_CELL_DATA_CODEPOINT, &cp);
+        _ = c.ghostty_cell_get(raw, c.GHOSTTY_CELL_DATA_WIDE, &wide);
+        return .{ .cp = cp, .spacer = wide != c.GHOSTTY_CELL_WIDE_NARROW and wide != c.GHOSTTY_CELL_WIDE_WIDE };
+    }
+
+    fn copyWrapped(ctx: *anyopaque, y: usize) bool {
+        const self: *Term = @ptrCast(@alignCast(ctx));
+        var ref: c.GhosttyGridRef = undefined;
+        var row: c.GhosttyRow = 0;
+        var wrapped = false;
+        if (self.screenRef(.{ .y = y }, &ref) and c.ghostty_grid_ref_row(&ref, &row) == c.GHOSTTY_SUCCESS) _ = c.ghostty_row_get(row, c.GHOSTTY_ROW_DATA_WRAP, &wrapped);
+        return wrapped;
+    }
+
+    pub fn selectGrid(self: *Term, range: @import("copymode.zig").Selection) void {
+        var sel = std.mem.zeroes(c.GhosttySelection);
+        if (!self.screenRef(range.start, &sel.start) or !self.screenRef(range.end, &sel.end)) return;
+        sel.rectangle = range.rectangle;
+        _ = c.ghostty_terminal_set(self.term, c.GHOSTTY_TERMINAL_OPT_SELECTION, &sel);
+    }
+
+    pub fn scrollToRow(self: *Term, top: usize) void {
+        self.scrollToBottom();
+        self.scroll(-@as(isize, @intCast((self.frame.scroll_total -| self.frame.scroll_len) -| top)));
+    }
+
     // Selection, by viewport cell.
 
     fn viewportRef(self: *Term, x: u16, y: u32, ref: *c.GhosttyGridRef) bool {
@@ -573,6 +630,67 @@ fn rgb(v: c.GhosttyColorRgb) u32 {
 
 fn rgbOf(v: u32) c.GhosttyColorRgb {
     return .{ .r = @truncate(v >> 16), .g = @truncate(v >> 8), .b = @truncate(v) };
+}
+
+test "copy-mode snapshot keeps history stable and uses the terminal selection formatter" {
+    const cm = @import("copymode.zig");
+    const live = Term.create(12, 3) orelse return error.NoTerminal;
+    defer live.destroy();
+    live.write("alpha one\r\nbeta two\r\ngamma three\r\ndelta four");
+    _ = live.render(true);
+    const frozen = live.freeze() orelse return error.NoSnapshot;
+    defer frozen.destroy();
+    const g = frozen.copyGrid();
+    try std.testing.expectEqual(@as(usize, 4), g.rows);
+    try std.testing.expectEqual(@as(u32, 'a'), g.read(g.ctx, .{}).cp);
+    live.write("\r\nnew output\r\nkeeps going");
+    _ = live.render(true);
+    try std.testing.expectEqual(@as(usize, 4), frozen.copyGrid().rows);
+    var m = cm.Mode.init(g, .{ .x = 0, .y = 0 }, 0, 3);
+    m.select(.rectangle);
+    m.digit(3);
+    m.move(g, .right);
+    m.move(g, .down);
+    frozen.selectGrid(m.selection(g).?);
+    const rectangle = frozen.selectionText() orelse return error.NoSelection;
+    defer gpa.free(rectangle);
+    try std.testing.expectEqualStrings("alph\nbeta", rectangle);
+    m.anchor = null;
+    m.cursor = .{};
+    m.select(.line);
+    m.move(g, .down);
+    frozen.selectGrid(m.selection(g).?);
+    const lines = frozen.selectionText() orelse return error.NoSelection;
+    defer gpa.free(lines);
+    try std.testing.expectEqualStrings("alpha one\nbeta two", lines);
+    frozen.scrollToRow(0);
+    _ = frozen.render(true);
+    try std.testing.expectEqual(@as(u64, 0), frozen.frame.scroll_offset);
+}
+
+test "copy mode preserves complete graphemes, wide cells and wrapped lines" {
+    const cm = @import("copymode.zig");
+    const t = Term.create(8, 3) orelse return error.NoTerminal;
+    defer t.destroy();
+    t.write("a界e\xcc\x81xyz123");
+    _ = t.render(true);
+    const g = t.copyGrid();
+    try std.testing.expect(g.wrapped(g.ctx, 0));
+    try std.testing.expect(g.read(g.ctx, .{ .x = 2 }).spacer);
+    var m = cm.Mode.init(g, .{ .x = 1 }, 0, 3);
+    m.select(.character);
+    m.move(g, .right);
+    try std.testing.expectEqual(@as(usize, 3), m.cursor.x);
+    t.selectGrid(m.selection(g).?);
+    const unicode = t.selectionText() orelse return error.NoSelection;
+    defer gpa.free(unicode);
+    try std.testing.expectEqualStrings("界e\xcc\x81", unicode);
+    m.anchor = .{};
+    m.move(g, .line_end);
+    t.selectGrid(m.selection(g).?);
+    const wrapped = t.selectionText() orelse return error.NoSelection;
+    defer gpa.free(wrapped);
+    try std.testing.expectEqualStrings("a界e\xcc\x81xyz123", wrapped);
 }
 
 test "a terminal takes output and renders it" {

@@ -92,6 +92,7 @@ pub fn main(init: std.process.Init) !void {
 test {
     _ = @import("rex/ws.zig");
     _ = @import("terminal/term.zig");
+    _ = @import("terminal/copymode.zig");
     _ = @import("rex/control.zig");
     _ = @import("util/json.zig");
     _ = @import("rex/view.zig");

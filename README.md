@@ -17,6 +17,8 @@ and please report them as [issues](https://github.com/zenodea/renux/issues).
   are the same here, in the Rex app and on a phone. Key bindings come from your Rex config.
 - **Fast terminals.** Text is drawn with libghostty-vt, with selection, find, links, box
   drawing, and your own font and theme.
+- **Keyboard copying.** Copy mode holds the scrollback still while the program keeps running.
+  Move with Vim keys, search, select characters, lines or a rectangle, and yank to the clipboard.
 - **Every tab at once.** The overview zooms out from the tab you are on to a grid of all your
   tabs, each drawn as its live terminals. A dot on a tab shows what each agent in it is doing.
   Pick a tab and it zooms back in.
@@ -95,6 +97,31 @@ foot of the sidebar.
 In the overview, the arrow keys or `h` `j` `k` `l` move between tabs, Enter goes to one and
 Escape goes back. `x` closes the tab the ring is on, `c` opens a new tab in its session and
 goes to it, and `s` groups the tabs by session.
+
+### Copy mode
+
+**Ctrl+Shift+Space** enters copy mode in the focused pane (**Shift+Command+C** on macOS).
+The mode chip shows the cursor's row and column, selection kind, and any search being typed.
+The entry shortcut can be changed in Settings > Shortcuts, or bound in your Rex config:
+
+```lua
+rex.bind("ctrl+a>[", "pane.copy_mode.enter")
+```
+
+- Move with `h j k l` or the arrows; `w b e` move by word, `W B E` by whitespace-separated word.
+  `0 ^ $` and Home/End move within the logical line; `H M L` within the visible screen.
+- `Ctrl+U/D` move half a screen, `Ctrl+B/F` or Page Up/Down a full screen. `g/G` jump to the
+  top/bottom of the scrollback; `{` and `}` move between paragraphs. Type a count first to
+  repeat a motion (`12k`), or choose a line (`12G`).
+- `v` selects characters, `V` whole lines, `Ctrl+V` a rectangle; the same key ends that kind
+  of selection. `o` swaps its ends.
+- `/` or `?` opens a forward/backward literal search; Enter searches, `n/N` repeat/reverse it.
+  `f F t T` find a character in the logical line; `;` and `,` repeat/reverse that find.
+- `y` or Enter copies the selection and leaves. `D` copies to the end of the logical line.
+  Escape or `q` leaves without copying and restores the original viewport.
+
+Wide characters are one cursor stop, wrapped rows remain one logical line, and copying uses
+exactly the same text formatter as mouse selection. [Copy-mode details and actions](docs/copy-mode.md).
 
 A remote host answers to its own Rex config. For the same keys everywhere, turn on
 Settings > Remote Hosts > Use this computer's keys on remote hosts.
