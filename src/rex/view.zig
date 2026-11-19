@@ -81,7 +81,9 @@ pub const Window = struct {
     /// The label, unless Rex generated it ("Window 1a2b3c4d").
     pub fn title(w: Window) ?[]const u8 {
         if (w.label.len == 0) return null;
-        if (w.label.len == 15 and std.mem.startsWith(u8, w.label, "Window ")) return null;
+        const prefix = "Window ";
+        if (w.label.len == prefix.len + 8 and std.mem.startsWith(u8, w.label, prefix) and
+            std.mem.endsWith(u8, w.id, w.label[prefix.len..])) return null;
         return w.label;
     }
 };
@@ -230,9 +232,20 @@ test "clamping survives an empty range" {
     try std.testing.expectEqual(@as(f64, 0), clampWithin(0.5, 0, std.math.nan(f64)));
 }
 
+test "keeps an explicit label that resembles a generated one" {
+    const w: Window = .{
+        .id = "window:01234567-89ab-cdef-0123-45670a1b2c3d",
+        .label = "Window deadbeef",
+        .focused_block_id = null,
+        .zoomed_block_id = null,
+        .layers = &.{},
+    };
+    try std.testing.expectEqualStrings("Window deadbeef", w.title().?);
+}
+
 test "parses a split window" {
     const text =
-        \\{"revision":3,"session_id":"s1","label":"work","active_window_id":"w1","windows":[{"window_id":"w1","label":"Window 0a1b2c3d",
+        \\{"revision":3,"session_id":"s1","label":"work","active_window_id":"window:01234567-89ab-cdef-0123-45670a1b2c3d","windows":[{"window_id":"window:01234567-89ab-cdef-0123-45670a1b2c3d","label":"Window 0a1b2c3d",
         \\"focused_block_id":"b2","layers":[{"layer_id":"l1","kind":"tiled","bounds":[0,0,1,1],"layout":{"rect":[0,0,1,1],
         \\"split":{"split_id":"p1","direction":"horizontal","ratio":0.25,"before":{"rect":[0,0,0.25,1],"block_id":"b1"},
         \\"after":{"rect":[0.25,0,0.75,1],"block_id":"b2"}}},"blocks":[{"block_id":"b1","creator_name":"com.superlogical.terminal"},

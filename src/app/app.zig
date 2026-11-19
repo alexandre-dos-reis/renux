@@ -2338,14 +2338,14 @@ pub const App = struct {
         if (ctx.app.addHost(label, url)) |h| ctx.app.selectHost(h);
     }
 
-    /// A window's row shows its focused pane: that pane's program and title, like Rex.
+    /// A window's row shows its explicit label, or the focused pane's title.
     pub fn rowTitle(h: *Host, buf: []u8, w: *const view.Window, v: *const view.SessionView) [:0]const u8 {
+        if (w.title()) |t| return std.fmt.bufPrintSentinel(buf, "{s}", .{t}, 0) catch "Window";
         if (w.focused_block_id) |fb| for (h.workspace.panes.items) |p| if (std.mem.eql(u8, p.block_id, fb)) {
             var tb: [256]u8 = undefined;
             const t = p.term.title(&tb);
             return std.fmt.bufPrintSentinel(buf, "{s}", .{t}, 0) catch "Window";
         };
-        if (w.title()) |t| return std.fmt.bufPrintSentinel(buf, "{s}", .{t}, 0) catch "Window";
         const s = h.server;
         if (w.focused_block_id) |fb| if (s.blockInfo(fb)) |info| if (info.program) |prog| {
             var fbuf: [256]u8 = undefined;
