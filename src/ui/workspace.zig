@@ -25,6 +25,7 @@ const draw = @import("../util/draw.zig");
 const programs = @import("../icons/programs.zig");
 const settings = @import("../settings/settings.zig");
 const window_bg = @import("window_bg.zig");
+const wayland = @import("../platform/wayland.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -1431,6 +1432,25 @@ pub const Workspace = struct {
         return n;
     }
 
+    /// Where each card is drawn now, seen from `target` and moved by `dx` and `dy`, with how
+    /// round its corners are: what the desktop blurs behind while the window has no background.
+    pub fn frostParts(ws: *Workspace, target: *gtk.Widget, dx: f64, dy: f64, out: *std.ArrayList(wayland.Part)) void {
+        for (ws.panes.items) |*p| {
+            if (p.frame.getMapped() == 0) continue;
+            var at: graphene.Rect = undefined;
+            if (p.frame.computeBounds(target, &at) == 0) continue;
+            // Joined panes are square; the card behind them, below, has the round corners.
+            const radius: f64 = if (p.joined) 0 else if (!tight) 11 else if (p.floating) 8 else 0;
+            out.append(gpa, .{ .x = at.f_origin.f_x + dx, .y = at.f_origin.f_y + dy, .w = at.f_size.f_width, .h = at.f_size.f_height, .radius = radius }) catch return;
+        }
+        for (ws.backdrops.items) |bd| {
+            if (bd.widget.getMapped() == 0) continue;
+            var at: graphene.Rect = undefined;
+            if (bd.widget.computeBounds(target, &at) == 0) continue;
+            out.append(gpa, .{ .x = at.f_origin.f_x + dx, .y = at.f_origin.f_y + dy, .w = at.f_size.f_width, .h = at.f_size.f_height, .radius = window_bg.floating_radius }) catch return;
+        }
+    }
+
     fn isTiledCard(ws: *Workspace, w: *gtk.Widget) bool {
         for (ws.panes.items) |p| if (p.frame == w) return !p.floating;
         return false;
@@ -2312,6 +2332,9 @@ fn allocate(widget: *gtk.Widget, width: c_int, height: c_int, _: c_int) callconv
     if (cut_floating) widget.queueDraw();
 }
 
+/// Told each time a workspace's cards are drawn, where they are by then.
+pub var drawn: ?*const fn (ws: *Workspace) void = null;
+
 /// Set while the window is see-through: the tiled cards are cut where a floating card lies
 /// over them, so a floating pane shows the desktop behind the window, as the other panes do,
 /// rather than the pane under it.
@@ -2343,6 +2366,7 @@ const PaneArea = extern struct {
         const w = self.as(gtk.Widget);
         var cut: [32]window_bg.Hole = undefined;
         const ws = Workspace.fromWidget(w);
+        if (ws) |x| if (drawn) |f| f(x);
         const n = if (!cut_floating) 0 else if (ws) |x| x.floatingHoles(w, &cut) else 0;
         if (n == 0) {
             var c = w.getFirstChild();

@@ -25,6 +25,7 @@
 //! A tab with agents in it carries a small dot for each in its top right corner, in the color
 //! of what that agent is doing, so the grid can be watched in place of the panes.
 const std = @import("std");
+const builtin = @import("builtin");
 const glib = @import("glib");
 const gobject = @import("gobject");
 const gtk = @import("gtk");
@@ -38,6 +39,7 @@ const Workspace = workspace_mod.Workspace;
 const K = @import("../terminal/keys.zig");
 const programs = @import("../icons/programs.zig");
 const settings = @import("../settings/settings.zig");
+const wayland = @import("../platform/wayland.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -150,7 +152,6 @@ pub const Overview = struct {
     app: *app_mod.App,
     area: *Area,
     ring: *gtk.Widget,
-    button: *gtk.Button,
     /// Groups the tabs by session, or not; the keys the overview answers to, said once.
     group_button: *gtk.ToggleButton,
     hint: *gtk.Label,
@@ -199,6 +200,9 @@ pub const Overview = struct {
     content: [4]f64 = .{ 0, 0, 1, 1 },
     /// Where the pointer last was, so a still pointer doesn't steal the ring from the keys.
     pointer: [2]f64 = .{ -1, -1 },
+    /// The parts of the window the desktop was last asked to blur, and no others; see `frost`.
+    frosted: std.ArrayList(wayland.Part) = .empty,
+    frosting: bool = false,
 
     pub fn create(a: *app_mod.App) *Overview {
         const o = gpa.create(Overview) catch @panic("out of memory");
@@ -210,12 +214,6 @@ pub const Overview = struct {
         ring.as(gtk.Widget).addCssClass("overview-ring");
         ring.as(gtk.Widget).setCanTarget(0);
         ring.as(gtk.Widget).setParent(w);
-        const button = gtk.Button.newWithLabel("Full screen");
-        button.as(gtk.Widget).addCssClass("pill");
-        button.as(gtk.Widget).addCssClass("overview-button");
-        button.as(gtk.Widget).setFocusable(0);
-        button.as(gtk.Actionable).setActionName("app.full-screen");
-        button.as(gtk.Widget).setParent(w);
         const group_button = gtk.ToggleButton.newWithLabel("By session");
         group_button.as(gtk.Widget).addCssClass("pill");
         group_button.as(gtk.Widget).addCssClass("overview-button");
@@ -226,7 +224,7 @@ pub const Overview = struct {
         hint.as(gtk.Widget).addCssClass("overview-hint");
         hint.as(gtk.Widget).setCanTarget(0);
         hint.as(gtk.Widget).setParent(w);
-        o.* = .{ .app = a, .area = area, .ring = ring.as(gtk.Widget), .button = button, .group_button = group_button, .hint = hint };
+        o.* = .{ .app = a, .area = area, .ring = ring.as(gtk.Widget), .group_button = group_button, .hint = hint };
         _ = gtk.ToggleButton.signals.toggled.connect(group_button, *Overview, &groupToggled, o, .{});
         area.overview = o;
         current = o;
@@ -315,7 +313,7 @@ pub const Overview = struct {
     }
 
     /// Measures which part of a tab's place its panes cover, from the window's own panes: the
-    /// margins they keep there change with the pane style and with full screen mode.
+    /// margins they keep there change with the pane style and with the window's background.
     fn measureContent(o: *Overview) void {
         const main = o.app.workspace orelse return;
         var full: graphene.Rect = undefined;
@@ -389,6 +387,9 @@ pub const Overview = struct {
         o.awaited = null;
         if (o.reap_idle == 0 and o.dead.items.len > 0) o.reap_idle = glib.idleAdd(&reap, o);
         o.widget().setVisible(0);
+        // The window's panes are back, and what is blurred is theirs to say again.
+        o.frosting = false;
+        o.app.frost();
         const a = o.app;
         if (!a.board.shown()) {
             a.stack.as(gtk.Widget).setOpacity(1);
@@ -578,6 +579,8 @@ pub const Overview = struct {
             card.as(gtk.Widget).setParent(o.widget());
             const label = gtk.Label.new(null);
             label.as(gtk.Widget).addCssClass("overview-name");
+            // A session's name is told from its tabs' where there is no card around them.
+            label.as(gtk.Widget).addCssClass("overview-session");
             // A session's name is lit like the name of the tab the ring is on, not dimmed.
             label.as(gtk.Widget).addCssClass("chosen");
             label.as(gtk.Widget).setCanTarget(0);
@@ -703,10 +706,9 @@ pub const Overview = struct {
         for (o.tiles.items) |t| if (t.ws) |ws| ws.headersChanged();
     }
 
-    /// Full screen mode went on or off: the button says what pressing it does now.
+    /// The window's background went or came back.
     pub fn bareChanged(o: *Overview) void {
-        o.button.setLabel(if (o.app.bare) "Leave full screen" else "Full screen");
-        // The panes' margins change with the mode, and the ring and cards follow them.
+        // The panes' margins change with it, and the ring and cards follow them.
         if (o.open) o.widget().queueAllocate();
     }
 
@@ -1001,10 +1003,10 @@ pub const Overview = struct {
         }
         o.ring_at = .{ home[0] + o.ring_off[0], home[1] + o.ring_off[1] };
         place(o.ring, @round(sel[2]) + 2 * ring_gap, @round(sel[3]) + 2 * ring_gap, o.ring_at[0], o.ring_at[1], 1);
-        // The two buttons side by side in the middle of the foot, the keys at its right end.
-        const buttons = [_]*gtk.Widget{ o.group_button.as(gtk.Widget), o.button.as(gtk.Widget) };
-        var sizes: [2][2]f64 = undefined;
-        var row_w: f64 = 8;
+        // The button in the middle of the foot, the keys at its right end.
+        const buttons = [_]*gtk.Widget{o.group_button.as(gtk.Widget)};
+        var sizes: [1][2]f64 = undefined;
+        var row_w: f64 = 0;
         for (buttons, 0..) |b, i| {
             sizes[i] = natural(b);
             row_w += sizes[i][0];
@@ -1301,16 +1303,64 @@ pub const Overview = struct {
         sn.restore();
     }
 
+    /// While the window has no background and the gaps are to be sharp, has the desktop blur
+    /// only what is behind the tabs, where they are drawn in this frame. A desktop that blurs
+    /// all of a see-through window would otherwise blur the room between the tabs too, which
+    /// then looks like a window lying behind them.
+    fn frost(o: *Overview, v: [4]f64, k: f64, far: f64) void {
+        if (builtin.os.tag != .linux) return;
+        if (!o.app.bare or !settings.current.sharp_gaps) return o.frostAsUsual();
+        const window = o.app.window;
+        const surface = window.as(gtk.Native).getSurface() orelse return;
+        var at: graphene.Rect = undefined;
+        if (o.widget().computeBounds(window.as(gtk.Widget), &at) == 0) return;
+        var off_x: f64 = 0;
+        var off_y: f64 = 0;
+        window.as(gtk.Native).getSurfaceTransform(&off_x, &off_y);
+        const left = off_x + at.f_origin.f_x;
+        const top = off_y + at.f_origin.f_y;
+        const right: f64 = @floatFromInt(surface.getWidth());
+        const bottom: f64 = @floatFromInt(surface.getHeight());
+        var now: std.ArrayList(wayland.Part) = .empty;
+        defer now.deinit(gpa);
+        // The sidebar's card stays beside the grid, frosted as it was.
+        if (o.app.sidebarFrost()) |part| now.append(gpa, part) catch return;
+        for (o.tiles.items, 0..) |t, i| {
+            if (t.alpha <= 0) continue;
+            // A tab still landing in the grid is drawn small about its middle.
+            const land = o.landing(i, far);
+            const mid = center(t.cur);
+            const whole = o.contentRect(t.cur);
+            const c = [4]f64{ mid[0] + (whole[0] - mid[0]) * land, mid[1] + (whole[1] - mid[1]) * land, whole[2] * land, whole[3] * land };
+            // Only the part inside the window is named: while the zoom is close to one tab the
+            // others lie outside it, and Hyprland blurs nothing at all when any part named does.
+            const x0 = std.math.clamp(@round(left + (c[0] - v[0]) * k), 0, right);
+            const y0 = std.math.clamp(@round(top + (c[1] - v[1]) * k), 0, bottom);
+            const x1 = std.math.clamp(@round(left + (c[0] + c[2] - v[0]) * k), 0, right);
+            const y1 = std.math.clamp(@round(top + (c[1] + c[3] - v[1]) * k), 0, bottom);
+            if (x1 <= x0 or y1 <= y0) continue;
+            now.append(gpa, .{ .x = x0, .y = y0, .w = x1 - x0, .h = y1 - y0 }) catch return;
+        }
+        if (o.frosting and std.mem.eql(u8, std.mem.sliceAsBytes(now.items), std.mem.sliceAsBytes(o.frosted.items))) return;
+        std.mem.swap(std.ArrayList(wayland.Part), &now, &o.frosted);
+        o.frosting = true;
+        wayland.blurParts(surface, o.frosted.items);
+    }
+
+    /// Leaves the blur behind the window to the desktop again.
+    fn frostAsUsual(o: *Overview) void {
+        if (builtin.os.tag != .linux or !o.frosting) return;
+        o.frosting = false;
+        if (o.app.window.as(gtk.Native).getSurface()) |surface| wayland.blurAsUsual(surface);
+    }
+
     fn draw(o: *Overview, sn: *gtk.Snapshot) void {
         const w = o.widget();
         if (o.size[0] < 1 or o.tiles.items.len == 0) return;
         // The zoom passes the grid a little as it settles; nothing is more than fully there.
         const out = std.math.clamp(o.zoom, 0, 1);
-        // In full screen mode the window draws nothing behind the panes, so the grid would lie
-        // straight on the desktop, where a bright wallpaper swallows the names: it is dimmed.
-        if (o.app.bare and out > 0.01) {
-            sn.appendColor(&.{ .f_red = 0, .f_green = 0, .f_blue = 0, .f_alpha = @floatCast(0.34 * out) }, &.{ .f_origin = .{ .f_x = 0, .f_y = 0 }, .f_size = .{ .f_width = @floatCast(o.size[0]), .f_height = @floatCast(o.size[1]) } });
-        }
+        // Without its background the window draws nothing behind the panes, and nothing is drawn
+        // behind the grid either: each tab lies straight on the desktop, like a window of its own.
         // What belongs to the grid, its names, dots, ring and foot, comes in over the second
         // half of the zoom.
         const chrome = smooth((out - 0.5) / 0.5);
@@ -1324,6 +1374,7 @@ pub const Overview = struct {
         }
         const v = o.viewRect();
         const k = o.size[0] / @max(1, v[2]);
+        o.frost(v, k, far);
         sn.save();
         sn.scale(@floatCast(k), @floatCast(k));
         sn.translate(&.{ .f_x = @floatCast(-v[0]), .f_y = @floatCast(-v[1]) });
@@ -1415,7 +1466,7 @@ pub const Overview = struct {
         // The foot comes up from below as it appears.
         sn.save();
         sn.translate(&.{ .f_x = 0, .f_y = @floatCast(foot_rise * (1 - smooth(out))) });
-        inline for (.{ o.group_button.as(gtk.Widget), o.button.as(gtk.Widget), o.hint.as(gtk.Widget) }) |foot| w.snapshotChild(foot, sn);
+        inline for (.{ o.group_button.as(gtk.Widget), o.hint.as(gtk.Widget) }) |foot| w.snapshotChild(foot, sn);
         sn.restore();
         sn.pop();
     }
