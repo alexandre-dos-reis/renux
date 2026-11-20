@@ -1190,6 +1190,15 @@ pub const Server = struct {
         c.fire("client.key", .{ .session_id = session_id, .block_id = block_id, .key = key });
     }
 
+    /// The last key of a sequence bound to a Lua function, with the keys typed before it.
+    pub fn sendSequenceKey(s: *Server, session_id: []const u8, block_id: []const u8, key: anytype, prefix: []const []const u8) void {
+        const c = s.control orelse {
+            log.warn("key dropped: not connected", .{});
+            return;
+        };
+        c.fire("client.key", .{ .session_id = session_id, .block_id = block_id, .key = key, .prefix = prefix });
+    }
+
     const Moving = struct {
         session_id: []u8,
         block_id: []u8,
