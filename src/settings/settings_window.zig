@@ -586,6 +586,8 @@ fn effectsPage(ctx: *Ctx) *gtk.Widget {
     const see = group(p, "Transparency");
     percentRow(ctx, see, "Window", "One layer over the whole window: the sidebar, the board, and behind the panes", &settings.current.window_opacity);
     percentRow(ctx, see, "Terminals", "The panes and the board's columns, laid over the window's layer, so they're frosted more", &settings.current.terminal_opacity);
+    switchRow(ctx, see, "Window background", "Off, the window draws none: the panes, the sidebar and the board are cards with the desktop between them", &settings.current.window_background, App.applyLook);
+    if (!mac) switchRow(ctx, see, "Sharp gaps", "Without the window background, the desktop between the cards isn't blurred. Hyprland then draws the whole window again on every update, which can feel less smooth", &settings.current.sharp_gaps, App.applyLook);
     // On Linux the desktop does any blurring, so there's nothing for Renux to switch.
     if (mac) switchRow(ctx, see, "Blur", "Frost what shows through", &settings.current.blur, App.applyLook);
     shaderRow(ctx, p);

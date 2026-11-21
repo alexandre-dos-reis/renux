@@ -27,7 +27,6 @@ const local = [_]struct { title: [:0]const u8, action: [:0]const u8, words: []co
     .{ .title = "Forward Port…", .action = "app.forward-port", .words = "client.host.forward_port localhost remote tunnel browser tcp" },
     .{ .title = "Toggle sidebar", .action = "app.toggle-sidebar", .words = "hide show" },
     .{ .title = "Overview", .action = "app.overview", .words = "all tabs windows zoom out grid expose mission" },
-    .{ .title = "Full screen mode", .action = "app.full-screen", .words = "panes only hide sidebar background bare zen focus" },
     .{ .title = "Tight layout", .action = "app.tight", .words = "compact tmux relaxed" },
     .{ .title = "Settings", .action = "app.settings", .words = "preferences font" },
 };

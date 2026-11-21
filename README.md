@@ -11,6 +11,10 @@ and please report them as [issues](https://github.com/zenodea/renux/issues).
 
 ![Renux over a desktop wallpaper: a sidebar of sessions, a shell, and two coding agents at work](docs/screenshots/panes.png)
 
+[![A minute of Renux: find and file peek in a shell, a floating pane, the activity panel, the agent board, the overview, a CRT shader, and the window without its background](docs/screenshots/demo.webp)](docs/screenshots/demo.mp4)
+
+*Click for the full-size video.*
+
 ## What it does
 
 - **Your Rex sessions, as they are.** Sessions, tabs and panes live on the Rex server, so they
@@ -24,7 +28,8 @@ and please report them as [issues](https://github.com/zenodea/renux/issues).
   Pick a tab and it zooms back in.
 - **Room for your panes.** Drag the sidebar's inner edge to resize it. Renux remembers the
   width. Shortcuts fade as space runs out; the **⋯** menu at the bottom keeps their actions
-  within reach. Full screen mode hides the sidebar, title rows and window background entirely.
+  within reach. Switch **Window background** off in Settings > Effects and the window draws
+  none: the panes, the sidebar and the board are cards with the desktop between them.
 - **Your agents at a glance.** Panes running coding agents show what they are doing, and the
   agent board sorts them into Idle, Running, Attention and Done. In Settings > Server > Agents,
   **Keep this computer awake while an agent is working** asks your desktop to prevent suspend
@@ -73,7 +78,7 @@ and please report them as [issues](https://github.com/zenodea/renux/issues).
 |---|---|
 | ![Agents sorted into four columns by state](docs/screenshots/board.png) | ![Six tabs in a grid, each showing its terminals, with a dot for each agent's state](docs/screenshots/overview.png) |
 
-| Shaders | Full screen mode |
+| Shaders | No window background |
 |---|---|
 | ![Three panes drawn through the CRT shader, curved and scanlined](docs/screenshots/shaders.png) | ![Only the terminals: one large pane and two stacked beside it, the desktop showing between them](docs/screenshots/fullscreen.png) |
 
@@ -107,17 +112,16 @@ Settings are kept in `~/.config/renux`.
 
 ## Keys
 
-Key bindings come from your Rex config, so the keys you know work here. Renux adds two actions
+Key bindings come from your Rex config, so the keys you know work here. Renux adds an action
 of its own to bind there:
 
 ```lua
-rex.bind("ctrl+a>shift+o", "client.overview.toggle")   -- every tab at once
-rex.bind("ctrl+a>shift+f", "client.fullscreen.toggle") -- only the terminals
+rex.bind("ctrl+a>shift+o", "client.overview.toggle") -- every tab at once
 ```
 
 The overview and the agent board are off until you switch them on in Settings, under
-Developer. Both actions are in the command palette too, and the overview has a button at the
-foot of the sidebar.
+Developer. The overview is in the command palette too, and has a button at the foot of the
+sidebar.
 In the overview, the arrow keys or `h` `j` `k` `l` move between tabs, Enter goes to one and
 Escape goes back. `x` closes the tab the ring is on, `c` opens a new tab in its session and
 goes to it, and `s` groups the tabs by session.

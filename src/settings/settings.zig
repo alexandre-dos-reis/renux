@@ -49,6 +49,14 @@ pub const Settings = struct {
     terminal_opacity: f64 = 1,
     /// Blurs what shows through. On Linux the desktop decides; KDE and Hyprland do it.
     blur: bool = true,
+    /// Whether the window draws a background of its own. Without one only the cards show:
+    /// the panes, the sidebar and the board, with the desktop between them.
+    window_background: bool = true,
+    /// Without the window's background: whether the desktop shows sharp between the cards,
+    /// by naming to the desktop what to blur. Off, the desktop blurs behind all of the window,
+    /// the room between the cards too. Hyprland (0.57) draws all of a window that names what
+    /// to blur again on its every update, however small, so this costs smoothness there.
+    sharp_gaps: bool = false,
     /// The sidebar's width in pixels, set by dragging its edge.
     sidebar_width: f64 = 292,
     /// How far a trackpad's movement scrolls a terminal, as a multiple of the fingers' own.

@@ -86,6 +86,8 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag != .macos) mod.linkSystemLibrary("fontconfig", .{});
     // Draws PDF pages for the file peek.
     if (target.result.os.tag != .macos) mod.linkSystemLibrary("poppler-glib", .{});
+    // Says which parts of a see-through window the desktop blurs (`platform/wayland.zig`).
+    if (target.result.os.tag != .macos) mod.linkSystemLibrary("wayland-client", .{});
 
     // On a Mac (only used for development) Zig's linker names a library once for every binding
     // module that links it, and dyld refuses such a binary. So there the binding modules link

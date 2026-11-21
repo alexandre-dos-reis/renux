@@ -8,6 +8,7 @@ const gobject = @import("gobject");
 const gio = @import("gio");
 const gtk = @import("gtk");
 const gdk = @import("gdk");
+const graphene = @import("graphene");
 const gsk = @import("gsk");
 const pango = @import("pango");
 const adw = @import("adw");
@@ -26,6 +27,8 @@ const keys = @import("../terminal/keys.zig");
 const Palette = @import("../ui/palette.zig").Palette;
 const reorder = @import("../ui/reorder.zig");
 const sidebar_tools = @import("../ui/sidebar_tools.zig");
+const sidebar_slide = @import("../ui/sidebar_slide.zig");
+const wayland = @import("../platform/wayland.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -52,6 +55,8 @@ const css =
     \\.pick-card:checked { background-color: alpha(@accent_bg_color, 0.12); box-shadow: inset 0 0 0 2px @accent_bg_color; color: @window_fg_color; font-weight: 700; }
     \\.settings-sample-row { padding: 12px; }
     \\.board { background-color: @renux_shell; padding: 14px 14px 12px 14px; }
+    \\.panes.under-board { opacity: 0; transition: opacity 200ms ease-in; }
+    \\.panes.under-board.at-once { transition: none; }
     \\.board-title { font-weight: 700; font-size: 1.15em; margin-left: 4px; }
     \\.board-column { background-color: @view_bg_color; border-radius: 11px; border: 1px solid @renux_stroke_subtle; padding: 10px 8px 8px 8px; }
     \\.board-column-head { padding: 0 6px 2px 4px; }
@@ -187,6 +192,8 @@ const css =
     \\.palette-category { color: @renux_secondary; font-size: 0.85em; }
     \\.palette-keys { font-family: monospace; font-size: 0.85em; color: @renux_secondary; background-color: alpha(@window_fg_color, 0.07); border-radius: 5px; padding: 1px 6px; }
     \\.activity-panel { background-color: @popover_bg_color; border-radius: 12px; box-shadow: 0 10px 34px alpha(black, 0.42), inset 0 0 0 1px alpha(@window_fg_color, 0.08); }
+    \\.activity-panel { opacity: 0; transform: translateX(28px); transition: opacity 130ms ease-in, transform 150ms ease-in; }
+    \\.activity-panel.shown { opacity: 1; transform: none; transition: opacity 150ms ease-out, transform 240ms cubic-bezier(0.2, 0.9, 0.3, 1); }
     \\.activity-head { padding: 12px 12px 6px 16px; }
     \\.activity-title { font-weight: 700; font-size: 1.05em; }
     \\.activity-head button { min-height: 24px; padding: 0 10px; font-size: 0.85em; }
@@ -195,6 +202,12 @@ const css =
     \\.activity-heading { font-size: 0.8em; font-weight: 600; color: @renux_secondary; margin: 10px 0 2px 8px; }
     \\.activity-row { border-radius: 9px; padding: 6px 8px; }
     \\.activity-row:hover { background-color: alpha(@window_fg_color, 0.06); }
+    \\.activity-row.current { background-color: alpha(@window_fg_color, 0.09); box-shadow: 0 1px 3px alpha(black, 0.14); }
+    \\.activity-row.current:hover { background-color: alpha(@window_fg_color, 0.12); }
+    \\.activity-row:focus-visible { outline: 2px solid alpha(@accent_bg_color, 0.85); outline-offset: -2px; background-color: alpha(@window_fg_color, 0.06); }
+    \\.activity-when { font-size: 0.8em; color: @renux_secondary; margin-left: 8px; }
+    \\.activity-progress { margin: 4px 0 1px 0; }
+    \\.activity-hint { font-size: 0.78em; color: alpha(@window_fg_color, 0.45); padding: 7px 0 10px 0; }
     \\.activity-name { font-weight: 500; }
     \\.activity-detail { font-size: 0.85em; color: @renux_secondary; }
     \\.activity-row.blocked .activity-detail { color: @warning_color; }
@@ -229,7 +242,7 @@ const css =
     \\.hint-desc { min-height: 20px; }
     \\.mode-chip { background-color: @accent_bg_color; color: @accent_fg_color; font-weight: 700; font-size: 0.85em; border-radius: 99px; padding: 6px 16px; box-shadow: 0 4px 16px alpha(black, 0.35); }
     \\.connect-box { margin: 0 24px; }
-    \\.overview-name { font-size: 0.9em; font-weight: 600; color: alpha(@window_fg_color, 0.55); text-shadow: 0 1px 4px alpha(black, 0.7); transition: color 140ms ease-out; }
+    \\.overview-name { font-size: 0.9em; font-weight: 600; color: alpha(@window_fg_color, 0.55); text-shadow: 0 1px 4px alpha(@renux_shell, 0.7); transition: color 140ms ease-out; }
     \\.overview-name.chosen { color: @window_fg_color; }
     \\.overview-dots { background-color: alpha(black, 0.38); border-radius: 99px; padding: 4px 6px; }
     \\.overview-dot { min-width: 7px; min-height: 7px; border-radius: 99px; background-color: alpha(white, 0.32); }
@@ -239,11 +252,22 @@ const css =
     \\.overview-dot.done { background-color: #4cc76a; }
     \\.overview-host { background-color: alpha(black, 0.38); border-radius: 99px; padding: 1px 9px; font-size: 0.75em; font-weight: 600; color: alpha(white, 0.82); }
     \\.overview-group { background-color: alpha(@window_fg_color, 0.05); border-radius: 14px; box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.07); }
-    \\.overview-hint { font-size: 0.8em; color: alpha(@window_fg_color, 0.5); text-shadow: 0 1px 3px alpha(black, 0.6); }
+    \\.overview-hint { font-size: 0.8em; color: alpha(@window_fg_color, 0.5); text-shadow: 0 1px 3px alpha(@renux_shell, 0.6); }
     \\.overview-blank { background-color: alpha(@view_bg_color, 0.7); border-radius: 6px; box-shadow: inset 0 0 0 1px @renux_stroke_subtle; }
     \\.overview-ring { border: 2px solid @accent_bg_color; border-radius: 8px; }
     \\.overview-button { padding: 4px 16px; font-size: 0.9em; }
     \\window.renux.bare .content .workspace, window.renux.bare .content.alone .workspace { margin: 0; }
+    \\window.renux.bare .renux-sidebar { border-radius: 11px; border: 1px solid @renux_stroke_subtle; margin-right: 8px; }
+    \\window.renux.bare.sidebar-end .renux-sidebar { margin-right: 0; margin-left: 8px; }
+    \\window.renux.bare.tight .renux-sidebar { border-radius: 0; border: none; margin-right: 1px; }
+    \\window.renux.bare.tight.sidebar-end .renux-sidebar { margin-right: 0; margin-left: 1px; }
+    \\window.renux.bare .overview-name, window.renux.bare .overview-hint { background-color: @popover_bg_color; border-radius: 99px; padding: 2px 10px; text-shadow: none; box-shadow: 0 1px 6px alpha(black, 0.25); }
+    \\window.renux.bare .overview-hint { color: alpha(@window_fg_color, 0.7); }
+    \\window.renux.bare .overview-session { background-color: @window_fg_color; color: @popover_bg_color; }
+    \\window.renux.bare .overview-group { background: none; box-shadow: none; }
+    \\window.renux.bare .overview-button { background-color: @popover_bg_color; box-shadow: 0 1px 6px alpha(black, 0.25); }
+    \\window.renux.bare .overview-button:hover { background-color: mix(@popover_bg_color, @window_fg_color, 0.1); }
+    \\window.renux.bare .overview-button:checked { background-color: mix(@popover_bg_color, @window_fg_color, 0.16); }
 ;
 
 const Row = struct { host: *Host, session_id: []u8, window_id: []u8, block_id: []u8 = &.{}, label: ?*gtk.Label = null, line: ?*gtk.Box = null, tile: ?*gtk.Widget = null };
@@ -352,10 +376,8 @@ pub const App = struct {
     corner: *gtk.Widget = undefined,
     /// The window's own buttons in the corner, which Settings can take away.
     corner_controls: *gtk.Widget = undefined,
-    /// Full screen mode: only the panes are drawn, with no sidebar, corner or window background.
+    /// The window draws no background of its own: only the cards show, with no corner.
     bare: bool = false,
-    /// Whether the sidebar was showing when full screen mode came on, to put it back after.
-    bare_sidebar: bool = true,
     corner_tick: c_uint = 0,
     corner_until: i64 = 0,
     stack: *gtk.Stack = undefined,
@@ -374,6 +396,17 @@ pub const App = struct {
     sidebar_menu: *gio.Menu = undefined,
     header_room: *gtk.Widget = undefined,
     side_root: *gtk.Widget = undefined,
+    /// The sidebar itself, a card of its own while the window has no background.
+    side_card: *gtk.Widget = undefined,
+    /// What the desktop was last asked to blur and nothing else, while the window has no
+    /// background; `frost`.
+    frost_now: std.ArrayList(wayland.Part) = .empty,
+    frost_sent: std.ArrayList(wayland.Part) = .empty,
+    frost_said: u32 = 0,
+    frosting: bool = false,
+    /// Holds the sidebar, and slides it out from under the panes while the window has no
+    /// background.
+    side_slide: *gtk.Widget = undefined,
     sidebar_handle: *gtk.Widget = undefined,
     sidebar_drag_start: ?f64 = null,
     board: *@import("../ui/board.zig").Board = undefined,
@@ -552,6 +585,10 @@ pub const App = struct {
         a.eye_button = gtk.ToggleButton.new();
         const eye_art = gtk.Overlay.new();
         eye_art.setChild(icons.image(.eye, 16));
+        // As small as the eye itself, so the dot sits on the eye's corner, inside the button:
+        // at the button's own corner it reached past the header's edge, which cuts it off.
+        eye_art.as(gtk.Widget).setHalign(.center);
+        eye_art.as(gtk.Widget).setValign(.center);
         a.eye_dot = gtk.Box.new(.horizontal, 0).as(gtk.Widget);
         a.eye_dot.addCssClass("eye-dot");
         a.eye_dot.setHalign(.end);
@@ -610,6 +647,7 @@ pub const App = struct {
         a.corner = corner.as(gtk.Widget);
         a.stack = gtk.Stack.new();
         a.stack.setTransitionType(.crossfade);
+        a.stack.as(gtk.Widget).addCssClass("panes");
         a.stack.as(gtk.Widget).setVexpand(1);
         a.status = adw.StatusPage.new();
         a.retry_button = gtk.Button.newWithLabel("Try again");
@@ -657,7 +695,14 @@ pub const App = struct {
         a.split = split;
         // The inner edge is the hit target, but drag offsets belong to the stationary split.
         const side_overlay = gtk.Overlay.new();
-        side_overlay.setChild(side.as(gtk.Widget));
+        // Without the window's background the sidebar is a card of its own, with round corners that cut
+        // what is in it, and comes out from under the panes (`sidebar_slide.zig`).
+        side.as(gtk.Widget).setOverflow(.hidden);
+        a.side_card = side.as(gtk.Widget);
+        a.side_slide = sidebar_slide.new(side.as(gtk.Widget));
+        sidebar_slide.within = split.as(gtk.Widget);
+        side_overlay.setChild(a.side_slide);
+        side_overlay.as(gtk.Widget).setOverflow(.hidden);
         const handle = gtk.Box.new(.vertical, 0);
         handle.as(gtk.Widget).addCssClass("sidebar-handle");
         a.sidebar_handle = handle.as(gtk.Widget);
@@ -686,6 +731,7 @@ pub const App = struct {
         a.cursor_layer = cursor_layer.CursorLayer.new().as(gtk.Widget);
         cursor_layer.current = &cursorPane;
         termview.on_drawn = &paneDrawn;
+        @import("../ui/workspace.zig").drawn = &panesDrawn;
         layered.addOverlay(a.cursor_layer);
         layered.addOverlay(corner.as(gtk.Widget));
         // Which Rex key mode is on, such as resize, while one is.
@@ -888,12 +934,19 @@ pub const App = struct {
     pub fn showBoard(a: *App, on: bool) void {
         if (on and !settings.current.agent_board) return;
         // The board and going to a pane both leave the overview.
+        const from_overview = a.overview.shown();
         a.overview.hideNow();
         if (on == a.board.shown()) return;
         a.board.show(on);
+        a.frost();
         // The board is see-through when the window is, so the panes under it are hidden while
-        // it is open.
-        a.stack.as(gtk.Widget).setOpacity(if (on) 0 else 1);
+        // it is open. They fade out under it as it fades in: gone at once, they left nothing
+        // on screen for a moment, which without the window's background was the bare desktop. They are
+        // back at once when it goes, under what is left of it. From the overview they were
+        // hidden already and stay so.
+        const stack = a.stack.as(gtk.Widget);
+        if (on and from_overview) stack.addCssClass("at-once") else stack.removeCssClass("at-once");
+        if (on) stack.addCssClass("under-board") else stack.removeCssClass("under-board");
         // The button shows which it is; setting it runs `boardToggled`, which finds nothing
         // left to do.
         a.board_button.setActive(@intFromBool(on));
@@ -1165,6 +1218,12 @@ pub const App = struct {
             }
         }
         if (keys.isModifier(keyval)) return .left;
+        // With the keyboard in the activity panel, its keys move through the rows there. Any
+        // other key gives the keyboard back to the pane, and the panel stays as it is.
+        if (a.activity.cursor() != null) {
+            if (a.activity.key(keyval, mods)) return .taken;
+            return .to_pane;
+        }
         // With the keyboard in the sidebar, its keys move through the rows. Any other key
         // leaves it for the pane, as typing anywhere else does.
         if (a.sidebarCursor() != null) {
@@ -1237,6 +1296,8 @@ pub const App = struct {
         @import("../ui/workspace.zig").corner_right = a.cornerRight();
         a.tabsRoom();
         if (a.workspace) |ws| ws.cornerChanged();
+        // The sidebar's own slide from under the panes follows the split view's on each frame.
+        if (sidebar_slide.from_under) a.side_slide.queueAllocate();
         if (glib.getMonotonicTime() < a.corner_until) return 1;
         a.corner_tick = 0;
         return 0;
@@ -1658,6 +1719,8 @@ pub const App = struct {
         ws.show(sid, w);
         s.readyTerminals(sid, if (w) |shown| shown.id else null);
         a.selectSidebarRow();
+        // The activity panel marks the rows of the tab on screen.
+        a.activity.changed();
         a.rebuildTabs();
         // Panes have no place until they're laid out, so the corner's room is measured again,
         // and followed for a moment while they settle. Only another tab or another top-left pane
@@ -1909,16 +1972,23 @@ pub const App = struct {
         }
     }
 
+    /// What a pane's program says it is working on, or failing that the title it gave its
+    /// terminal. A shell's title is only its folder, so a shell has none.
+    pub fn taskOf(info: *const server_mod.BlockInfo) ?[]const u8 {
+        if (info.has_status) if (info.task) |t| if (t.len > 0) return t;
+        const prog = (if (info.has_status) info.status_app else null) orelse info.program;
+        const is_shell = if (prog) |p| termview.TermView.isShell(programs.programName(p)) else true;
+        if (!is_shell) if (info.title) |t| if (t.len > 0) return t;
+        return null;
+    }
+
     /// Writes an agent row's text from what its pane reports now.
     fn fillAgent(mark: *RowMark, h: *Host, block_id: []const u8) void {
         const info = h.server.blockInfo(block_id);
         var buf: [320]u8 = undefined;
         var zbuf: [321]u8 = undefined;
         const prog: ?[]const u8 = if (info) |i| ((if (i.has_status) i.status_app else null) orelse i.program) else null;
-        const is_shell = if (prog) |p| termview.TermView.isShell(programs.programName(p)) else true;
-        const task: ?[]const u8 = if (info) |i| (if (i.has_status) (if (i.task) |t| (if (t.len > 0) t else null) else null) else null) else null;
-        const own: ?[]const u8 = if (is_shell) null else if (info) |i| (if (i.title) |t| (if (t.len > 0) t else null) else null) else null;
-        const name = task orelse own orelse programs.displayTitle(&buf, prog, null);
+        const name = (if (info) |i| taskOf(i) else null) orelse programs.displayTitle(&buf, prog, null);
         const n = @min(name.len, zbuf.len - 1);
         @memcpy(zbuf[0..n], name[0..n]);
         zbuf[n] = 0;
@@ -2834,7 +2904,6 @@ pub const App = struct {
         if (std.mem.eql(u8, action, "client.sidebar.toggle")) return a.did(toggleSidebar);
         if (std.mem.eql(u8, action, "client.sidebar.focus")) return a.did(focusSidebar);
         if (std.mem.eql(u8, action, "client.board.toggle")) return a.did(toggleBoard);
-        if (std.mem.eql(u8, action, "client.fullscreen.toggle")) return a.did(toggleBare);
         if (std.mem.eql(u8, action, "client.overview.toggle")) return a.did(toggleOverview);
         if (std.mem.eql(u8, action, "client.tab.rename")) {
             const sid = a.session_id orelse return false;
@@ -3580,7 +3649,6 @@ pub const App = struct {
             .{ "retry", retry, "" },
             .{ "change-server", changeServer, "" },
             .{ "toggle-sidebar", toggleSidebar, "" },
-            .{ "full-screen", toggleBare, "" },
             .{ "overview", toggleOverview, "" },
             .{ "palette", openPalette, "" },
             .{ "settings", openSettings, "" },
@@ -4113,6 +4181,7 @@ pub const App = struct {
     /// Applies the window and terminal opacity and the blur behind them.
     pub fn applyLook(a: *App) void {
         const prefs = &settings.current;
+        a.setBare(!prefs.window_background);
         termview.term_opacity = prefs.terminal_opacity;
         const provider = a.look_css orelse blk: {
             const p = gtk.CssProvider.new();
@@ -4171,12 +4240,14 @@ pub const App = struct {
             \\.pane-card.focused { box-shadow: 0 0 8px alpha(black, 0.16); }
             \\.pane-card.floating.focused { box-shadow: 0 8px 28px alpha(black, 0.45); }
         ;
-        // Full screen mode: the window draws nothing behind the panes. The board, which lies over
-        // them, has no window background to show then, so it gets the window's color itself.
-        var bbuf: [256]u8 = undefined;
+        // Without its background the window draws nothing behind the panes. The board, which lies
+        // over them, has no window background to show then, so it gets the window's color itself.
+        // So does the sidebar, which shows there for as long as the keyboard is in it, as a
+        // card of its own beside the panes.
+        var bbuf: [512]u8 = undefined;
         const bare_text = if (!a.bare) "" else std.fmt.bufPrint(&bbuf,
-            \\window.renux {{ background-color: transparent; }}
-            \\window.renux .board {{ background-color: alpha(@renux_shell, {d:.2}); }}
+            \\window.renux, window.renux .sidebar-pane {{ background-color: transparent; }}
+            \\window.renux .board, window.renux .renux-sidebar {{ background-color: alpha(@renux_shell, {d:.2}); }}
         , .{prefs.window_opacity}) catch "";
         var sbuf: [128]u8 = undefined;
         const sidebar_text = std.fmt.bufPrint(&sbuf, ".renux-sidebar list {{ font-size: {d:.2}em; }}", .{prefs.sidebar_text_scale}) catch "";
@@ -4199,6 +4270,9 @@ pub const App = struct {
         };
         for (a.hosts.items) |h| h.workspace.refreshProgramBgs();
         a.redrawAll();
+        // Sharp gaps may have been switched: what the desktop blurs is said again.
+        a.frost();
+        if (a.overview.shown()) a.overview.widget().queueDraw();
     }
 
     /// Shows or hides the window's close, minimize and maximize buttons, for a desktop that
@@ -4210,8 +4284,7 @@ pub const App = struct {
     }
 
     pub fn headersChanged(a: *App) void {
-        // Full screen mode is the terminals and nothing else, so the title rows go too.
-        @import("../ui/workspace.zig").show_headers = settings.current.show_headers and !a.bare;
+        @import("../ui/workspace.zig").show_headers = settings.current.show_headers;
         for (a.hosts.items) |h| h.workspace.headersChanged();
         a.overview.headersChanged();
         a.markHeaders();
@@ -4303,16 +4376,7 @@ pub const App = struct {
     }
 
     fn toggleSidebar(a: *App) void {
-        // Asking for the sidebar in full screen mode leaves the mode, with the sidebar showing.
-        if (a.bare) {
-            a.bare_sidebar = true;
-            return a.setBare(false);
-        }
         a.split.setShowSidebar(@intFromBool(a.split.getShowSidebar() == 0));
-    }
-
-    fn toggleBare(a: *App) void {
-        a.setBare(!a.bare);
     }
 
     fn toggleOverview(a: *App) void {
@@ -4349,27 +4413,78 @@ pub const App = struct {
         a.showSelected();
     }
 
-    /// Full screen mode: the sidebar, the window's corner, the panes' title rows and the
-    /// background around the panes go away, so the terminals fill the window and only the
-    /// desktop shows between them. The
-    /// window keeps its size; making it cover the screen is left to the desktop.
-    pub fn setBare(a: *App, on: bool) void {
+    /// The window stops drawing a background of its own, or draws it again (Settings >
+    /// Effects > Window background). Without it only the cards show: the panes, the sidebar
+    /// and the board, with the desktop between them. The window's corner goes with it, having
+    /// nothing left to sit on, so the sidebar is shown and hidden by its key. `applyLook`
+    /// calls this, and goes on to style what is left.
+    fn setBare(a: *App, on: bool) void {
         if (a.bare == on) return;
         a.bare = on;
         const w = a.window.as(gtk.Widget);
-        if (on) {
-            a.bare_sidebar = a.split.getShowSidebar() != 0;
-            a.split.setShowSidebar(0);
-            w.addCssClass("bare");
-        } else {
-            w.removeCssClass("bare");
-            a.split.setShowSidebar(@intFromBool(a.bare_sidebar));
-        }
+        if (on) w.addCssClass("bare") else w.removeCssClass("bare");
         a.corner.setVisible(@intFromBool(!on));
-        a.headersChanged();
+        sidebar_slide.from_under = on;
+        a.side_slide.queueAllocate();
         a.overview.bareChanged();
-        a.applyLook();
         a.cornerChanged();
+        a.frost();
+    }
+
+    /// The sidebar's card as a part for the desktop to blur behind: as much of it as has come
+    /// out from under the panes, or nothing while it is hidden.
+    pub fn sidebarFrost(a: *App) ?wayland.Part {
+        const win = a.window.as(gtk.Widget);
+        var dx: f64 = 0;
+        var dy: f64 = 0;
+        a.window.as(gtk.Native).getSurfaceTransform(&dx, &dy);
+        var at: graphene.Rect = undefined;
+        var room: graphene.Rect = undefined;
+        if (a.side_root.getMapped() == 0 or a.side_card.computeBounds(win, &at) == 0 or a.side_root.computeBounds(win, &room) == 0) return null;
+        const x0 = @max(at.f_origin.f_x, room.f_origin.f_x);
+        const x1 = @min(at.f_origin.f_x + at.f_size.f_width, room.f_origin.f_x + room.f_size.f_width);
+        if (x1 <= x0) return null;
+        const whole = x1 - x0 >= at.f_size.f_width;
+        return .{ .x = x0 + dx, .y = at.f_origin.f_y + dy, .w = x1 - x0, .h = at.f_size.f_height, .radius = if (whole and !settings.current.tight) 11 else 0 };
+    }
+
+    /// With sharp gaps asked for and no window background, has the desktop blur only what is
+    /// behind the cards on screen: the panes', the sidebar's while it shows, or the board. A
+    /// desktop that blurs all of a see-through window otherwise blurs the room between the
+    /// cards too. Called as the cards are drawn, so what is blurred moves with them; the
+    /// overview names its tabs itself while it is open.
+    ///
+    /// It is a setting, and off unless asked for, because of what it costs on Hyprland 0.57:
+    /// for a window that names what to blur, every update of the window, however small, has
+    /// Hyprland draw all of it again (its `BackgroundEffect.cpp` damages the whole surface on
+    /// each commit). Measured on this window that was three times the GPU for a second of
+    /// animation, and naming the parts only while they are still, which avoids it, shows as
+    /// the blur between the cards coming and going.
+    pub fn frost(a: *App) void {
+        if (builtin.os.tag != .linux) return;
+        const surface = a.window.as(gtk.Native).getSurface() orelse return;
+        if (!a.bare or !settings.current.sharp_gaps) {
+            if (a.frosting) wayland.blurAsUsual(surface);
+            a.frosting = false;
+            return;
+        }
+        if (a.overview.shown()) return;
+        const win = a.window.as(gtk.Widget);
+        var dx: f64 = 0;
+        var dy: f64 = 0;
+        a.window.as(gtk.Native).getSurfaceTransform(&dx, &dy);
+        const parts = &a.frost_now;
+        parts.clearRetainingCapacity();
+        var at: graphene.Rect = undefined;
+        if (a.board.shown()) {
+            if (a.card.computeBounds(win, &at) != 0) parts.append(gpa, .{ .x = at.f_origin.f_x + dx, .y = at.f_origin.f_y + dy, .w = at.f_size.f_width, .h = at.f_size.f_height }) catch return;
+        } else if (a.workspace) |ws| ws.frostParts(win, dx, dy, parts);
+        if (a.sidebarFrost()) |part| parts.append(gpa, part) catch return;
+        if (a.frosting and a.frost_said == wayland.said and std.mem.eql(u8, std.mem.sliceAsBytes(parts.items), std.mem.sliceAsBytes(a.frost_sent.items))) return;
+        wayland.blurParts(surface, parts.items);
+        a.frosting = true;
+        a.frost_said = wayland.said;
+        std.mem.swap(std.ArrayList(wayland.Part), &a.frost_now, &a.frost_sent);
     }
 
     fn changeServer(a: *App) void {
@@ -4407,6 +4522,12 @@ fn cursorPane() ?*termview.TermView {
 }
 
 /// A pane drew: if it has the window's cursor, the cursor layer follows it.
+/// The window's own panes were drawn: what the desktop blurs follows them.
+fn panesDrawn(ws: *@import("../ui/workspace.zig").Workspace) void {
+    const a = mode_app orelse return;
+    if (a.workspace == ws) a.frost();
+}
+
 fn paneDrawn(v: *termview.TermView) void {
     const a = mode_app orelse return;
     if (cursorPane() != v) return;
@@ -4543,22 +4664,21 @@ pub fn describeAction(a: *App, buf: []u8, action: []const u8, args: ?[]const u8,
     if (title.len == 0 and std.mem.eql(u8, action, "pane.copy_mode.enter")) title = "Enter copy mode";
     var name_buf: [64]u8 = undefined;
     const known = [_][2][]const u8{
-        .{ "pane.split", "Split" },                          .{ "pane.focus", "Focus" },
-        .{ "pane.resize", "Resize" },                        .{ "pane.focus_next", "Next pane" },
-        .{ "pane.focus_previous", "Previous pane" },         .{ "pane.close", "Close pane" },
-        .{ "pane.zoom", "Zoom pane" },                       .{ "pane.balance", "Balance panes" },
-        .{ "pane.float", "Float or dock" },                  .{ "pane.send_key", "Send" },
-        .{ "client.tab.new", "New tab" },                    .{ "client.tab.next", "Next tab" },
-        .{ "client.tab.previous", "Previous tab" },          .{ "client.tab.rename", "Rename tab" },
-        .{ "client.tab.close", "Close tab" },                .{ "client.tab.goto", "Tab" },
-        .{ "client.find.open", "Find" },                     .{ "client.mode.enter", "Mode" },
-        .{ "client.config.reload", "Reload config" },        .{ "client.sidebar.toggle", "Sidebar" },
-        .{ "client.fullscreen.toggle", "Full screen mode" }, .{ "client.overview.toggle", "Overview" },
-        .{ "client.sidebar.activity.toggle", "Activity" },   .{ "client.palette.toggle", "Commands" },
-        .{ "client.sidebar.focus", "Sidebar keys" },         .{ "session.new", "New session" },
-        .{ "client.board.toggle", "Agent Board" },           .{ "session.switch", "Switch session" },
-        .{ "session.rename", "Rename session" },             .{ "session.next", "Next session" },
-        .{ "session.previous", "Previous session" },
+        .{ "pane.split", "Split" },                   .{ "pane.focus", "Focus" },
+        .{ "pane.resize", "Resize" },                 .{ "pane.focus_next", "Next pane" },
+        .{ "pane.focus_previous", "Previous pane" },  .{ "pane.close", "Close pane" },
+        .{ "pane.zoom", "Zoom pane" },                .{ "pane.balance", "Balance panes" },
+        .{ "pane.float", "Float or dock" },           .{ "pane.send_key", "Send" },
+        .{ "client.tab.new", "New tab" },             .{ "client.tab.next", "Next tab" },
+        .{ "client.tab.previous", "Previous tab" },   .{ "client.tab.rename", "Rename tab" },
+        .{ "client.tab.close", "Close tab" },         .{ "client.tab.goto", "Tab" },
+        .{ "client.find.open", "Find" },              .{ "client.mode.enter", "Mode" },
+        .{ "client.config.reload", "Reload config" }, .{ "client.sidebar.toggle", "Sidebar" },
+        .{ "client.overview.toggle", "Overview" },    .{ "client.sidebar.activity.toggle", "Activity" },
+        .{ "client.palette.toggle", "Commands" },     .{ "client.sidebar.focus", "Sidebar keys" },
+        .{ "session.new", "New session" },            .{ "client.board.toggle", "Agent Board" },
+        .{ "session.switch", "Switch session" },      .{ "session.rename", "Rename session" },
+        .{ "session.next", "Next session" },          .{ "session.previous", "Previous session" },
     };
     if (title.len == 0) for (known) |k| if (std.mem.eql(u8, k[0], action)) {
         title = k[1];
@@ -5141,7 +5261,8 @@ fn runScript(_: ?*anyopaque) callconv(.c) c_int {
             while (cps.nextCodepoint()) |cp| a.server.?.sendKey(tv.session_id, tv.block_id, @import("../terminal/keys.zig").forChar(cp, 0));
             a.server.?.sendKey(tv.session_id, tv.block_id, @import("../terminal/keys.zig").fromGdk(0xff0d, 0, 0).?);
         }
-        tv.widget().queueDraw();
+        // The pane the command began in may be gone by now, when the command went to another tab.
+        if (a.workspace) |now| if (now.focusedView()) |v| v.widget().queueDraw();
     }
     return 1;
 }
