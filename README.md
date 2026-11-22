@@ -92,6 +92,7 @@ Add Renux to the inputs in your system flake:
 
 ```nix
 inputs.renux.url = "github:zenodea/renux";
+inputs.renux.inputs.nixpkgs.follows = "nixpkgs";
 ```
 
 Add `renux` to the arguments of `outputs`. Append this module to your host's `nixosSystem.modules` list:
