@@ -1,0 +1,33 @@
+name: Nix
+
+on:
+  pull_request:
+    paths: &paths
+      - flake.nix
+      - flake.lock
+      - build.zig
+      - build.zig.zon
+      - third_party/**
+      - .github/workflows/nix.yml
+  push:
+    branches: [main]
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the Ghostty input matches the submodule
+        run: |
+          gitlink=$(git rev-parse HEAD:third_party/ghostty)
+          locked=$(jq -r .nodes.ghostty.locked.rev flake.lock)
+          [ "$gitlink" = "$locked" ] || { echo "::error file=flake.nix::Ghostty input is $locked, submodule is $gitlink"; exit 1; }
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+      - run: nix build -L
