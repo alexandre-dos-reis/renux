@@ -515,7 +515,7 @@ pub const App = struct {
         }
         const provider = gtk.CssProvider.new();
         provider.loadFromString(css);
-        gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, provider.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_APPLICATION);
+        gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, provider.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_USER);
 
         a.applyTheme();
         useAppIcon();
@@ -1618,7 +1618,7 @@ pub const App = struct {
         out.writer.writeByte(0) catch return;
         const provider = a.theme_css orelse blk: {
             const p = gtk.CssProvider.new();
-            gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, p.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_APPLICATION);
+            gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, p.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_USER);
             a.theme_css = p;
             break :blk p;
         };
@@ -4185,7 +4185,7 @@ pub const App = struct {
         termview.term_opacity = prefs.terminal_opacity;
         const provider = a.look_css orelse blk: {
             const p = gtk.CssProvider.new();
-            gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, p.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+            gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, p.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_USER + 1);
             a.look_css = p;
             break :blk p;
         };

@@ -307,7 +307,7 @@ fn shiftRows(r: *Reorder) void {
 fn setShift(height: f64) void {
     const provider = shift_css orelse blk: {
         const p = gtk.CssProvider.new();
-        gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault() orelse return, p.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 2);
+        gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault() orelse return, p.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_USER + 2);
         shift_css = p;
         break :blk p;
     };

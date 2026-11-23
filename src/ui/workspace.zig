@@ -1844,7 +1844,7 @@ pub const Workspace = struct {
         const provider = ws.bg_css orelse blk: {
             const display = gdk.Display.getDefault() orelse return;
             const pr = gtk.CssProvider.new();
-            gtk.StyleContext.addProviderForDisplay(display, pr.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 2);
+            gtk.StyleContext.addProviderForDisplay(display, pr.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_USER + 2);
             ws.bg_css = pr;
             break :blk pr;
         };
