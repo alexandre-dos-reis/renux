@@ -575,6 +575,12 @@ var chord_keys: [4][40]u8 = undefined;
 var chord_lens: [4]usize = .{ 0, 0, 0, 0 };
 var chord_len: usize = 0;
 
+/// The keys before one that ends a sequence bound to a Lua function, which the next key
+/// press carries to the server as its prefix.
+var forward_keys: [4][40]u8 = undefined;
+var forward_lens: [4]usize = .{ 0, 0, 0, 0 };
+var forward_len: usize = 0;
+
 /// Whether the first keys of a binding have been pressed and the rest are awaited.
 pub fn chordPending() bool {
     return chord_len > 0;
@@ -1194,6 +1200,13 @@ pub const TermView = struct {
                 v.held_len += 1;
             }
         }
+        if (forward_len > 0) {
+            var prefix: [4][]const u8 = undefined;
+            for (0..forward_len) |i| prefix[i] = forward_keys[i][0..forward_lens[i]];
+            const n = forward_len;
+            forward_len = 0;
+            return v.server.sendSequenceKey(v.session_id, v.block_id, out, prefix[0..n]);
+        }
         v.server.sendKey(v.session_id, v.block_id, out);
     }
 
@@ -1372,6 +1385,7 @@ pub const TermView = struct {
     /// through, as Rex does.
     fn chord(v: *TermView, name: []const u8) bool {
         const binds = v.server.keyBindings();
+        forward_len = 0;
         if (chord_len > 0 and keys.sameKey(name, "escape")) {
             chord_len = 0;
             chordChanged();
@@ -1387,6 +1401,13 @@ pub const TermView = struct {
             const was = chord_len;
             chord_len = 0;
             if (was > 0) chordChanged();
+            // A Lua function binding: the key goes on with client.key, and the server runs it.
+            if (std.mem.eql(u8, b.action, "client.key.forward")) {
+                forward_keys = chord_keys;
+                forward_lens = chord_lens;
+                forward_len = was;
+                return false;
+            }
             v.runBinding(b);
             return true;
         }
