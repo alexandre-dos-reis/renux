@@ -3,13 +3,15 @@
 //!
 //! Straight lines are described here as rectangles (`lineRects`), which the terminal fills
 //! itself: a screen of borders is hundreds of them, and a rectangle costs next to nothing to
-//! draw where a small Cairo picture per character cost most of a frame. Only the rounded
-//! corners and the diagonals, a handful on any screen, are drawn with Cairo. Block characters (halves, eighths, shades, quadrants and
+//! draw where a small Cairo picture per character cost most of a frame. Rounded corners use
+//! GTK paths to stay lined up with the straight strokes at any display scale. Diagonals and
+//! Powerline separators still use Cairo. Block characters (halves, eighths, shades, quadrants and
 //! sextants, which programs build pictures and filled shapes from) are only described here,
 //! as rectangles in shares of a cell: the terminal fills them itself, with their edges on
 //! whole screen pixels, so that neighbouring blocks meet with no line between them.
 const std = @import("std");
 const cairo = @import("cairo");
+const gsk = @import("gsk");
 
 const none = 0;
 const light = 1;
@@ -139,13 +141,16 @@ pub fn isHorizontal(cp: u32) bool {
     return s[0] != none and s[0] == s[1] and s[2] == none and s[3] == none;
 }
 
+pub fn lineThickness(h: f64) f64 {
+    return @max(1, @round(h / 16));
+}
+
 /// The rectangles of a line character in the cell at (x, y) of size (w, h): every character
-/// made of straight strokes. Null for the others (rounded corners, diagonals), which `draw`
-/// draws.
+/// made of straight strokes. Null for rounded corners, diagonals and other shapes.
 pub fn lineRects(cp: u32, x: f64, y: f64, w: f64, h: f64, out: *[8]Rect) ?[]const Rect {
     if (cp < 0x2500 or cp > 0x257F) return null;
     const s = table[cp - 0x2500] orelse return null;
-    const thin = @max(1, @round(h / 16));
+    const thin = lineThickness(h);
     var list: RectList = .{ .out = out };
     const cx = @round(x + w / 2);
     const cy = @round(y + h / 2);
@@ -206,13 +211,31 @@ const RectList = struct {
     }
 };
 
-/// Draws a rounded corner or a diagonal in the cell at (x, y) of size (w, h), in the current
-/// source color. The straight lines are `lineRects`'s.
+/// A rounded corner in row-local coordinates. Its arms end where the neighbouring straight
+/// strokes begin, including the horizontal edge snapped to a screen pixel by the caller.
+pub fn roundedPath(cp: u32, x: f64, w: f64, h: f64, x_edges: [2]f64) ?*gsk.Path {
+    if (cp < 0x256D or cp > 0x2570) return null;
+    const right = cp == 0x256D or cp == 0x2570;
+    const down = cp == 0x256D or cp == 0x256E;
+    const dx: f64 = if (right) 1 else -1;
+    const dy: f64 = if (down) 1 else -1;
+    const edge_x = x_edges[@intFromBool(right)];
+    const edge_y = if (down) h else 0;
+    const cx = @round(x + w / 2);
+    const cy = @round(h / 2);
+    const r = @max(0, @min((edge_x - cx) * dx, (edge_y - cy) * dy) / 2);
+    const b = gsk.PathBuilder.new();
+    b.moveTo(@floatCast(edge_x), @floatCast(cy));
+    b.lineTo(@floatCast(cx + dx * r), @floatCast(cy));
+    if (r > 0) b.conicTo(@floatCast(cx), @floatCast(cy), @floatCast(cx), @floatCast(cy + dy * r), std.math.sqrt1_2);
+    b.lineTo(@floatCast(cx), @floatCast(edge_y));
+    return b.freeToPath();
+}
+
+/// Draws a Powerline separator or diagonal in the cell, in the current source color.
 pub fn draw(cr: *cairo.Context, cp: u32, x: f64, y: f64, w: f64, h: f64) void {
     if (isPowerline(cp)) return powerline(cr, cp, x, y, w, h);
-    const thin = @max(1, @round(h / 16));
-    if (cp >= 0x256D and cp <= 0x2570) return rounded(cr, cp, x, y, w, h, thin);
-    if (cp >= 0x2571 and cp <= 0x2573) return diagonal(cr, cp, x, y, w, h, thin);
+    if (cp >= 0x2571 and cp <= 0x2573) return diagonal(cr, cp, x, y, w, h, lineThickness(h));
 }
 
 /// A Powerline separator in the cell at (x, y). Filled shapes reach half a pixel past the
@@ -220,7 +243,7 @@ pub fn draw(cr: *cairo.Context, cp: u32, x: f64, y: f64, w: f64, h: f64) void {
 fn powerline(cr: *cairo.Context, cp: u32, x: f64, y: f64, w: f64, h: f64) void {
     const e = 0.5;
     const my = y + h / 2;
-    const thin = @max(1, @round(h / 16));
+    const thin = lineThickness(h);
     switch (cp) {
         0xE0B0, 0xE0B2 => {
             const right = cp == 0xE0B0;
@@ -301,36 +324,6 @@ fn powerline(cr: *cairo.Context, cp: u32, x: f64, y: f64, w: f64, h: f64) void {
     }
 }
 
-fn rounded(cr: *cairo.Context, cp: u32, x: f64, y: f64, w: f64, h: f64, thin: f64) void {
-    const cx = @round(x + w / 2);
-    const cy = @round(y + h / 2);
-    const r = @min(w, h) / 2;
-    switch (cp) {
-        0x256D => {
-            cr.moveTo(x + w, cy);
-            cr.curveTo(cx, cy, cx, cy, cx, cy + r);
-            cr.lineTo(cx, y + h);
-        },
-        0x256E => {
-            cr.moveTo(x, cy);
-            cr.curveTo(cx, cy, cx, cy, cx, cy + r);
-            cr.lineTo(cx, y + h);
-        },
-        0x256F => {
-            cr.moveTo(x, cy);
-            cr.curveTo(cx, cy, cx, cy, cx, cy - r);
-            cr.lineTo(cx, y);
-        },
-        else => {
-            cr.moveTo(x + w, cy);
-            cr.curveTo(cx, cy, cx, cy, cx, cy - r);
-            cr.lineTo(cx, y);
-        },
-    }
-    cr.setLineWidth(thin);
-    cr.stroke();
-}
-
 fn diagonal(cr: *cairo.Context, cp: u32, x: f64, y: f64, w: f64, h: f64, thin: f64) void {
     cr.setLineWidth(thin);
     if (cp == 0x2571 or cp == 0x2573) {
@@ -375,6 +368,31 @@ test "straight lines are rectangles, and a run of a horizontal line is one of th
     // A double cross is the most strokes there are; rounded corners and letters have none.
     try std.testing.expectEqual(@as(usize, 8), lineRects(0x256C, 0, 0, 10, 20, &buf).?.len);
     try std.testing.expect(lineRects(0x256D, 0, 0, 10, 20, &buf) == null and lineRects('a', 0, 0, 10, 20, &buf) == null);
+}
+
+test "all rounded corners meet straight strokes in a fractional-width cell" {
+    const Point = @import("graphene").Point;
+    const x = 13.4;
+    const w = 15.15;
+    const h = 35;
+    // Cell edges snapped at 125% scale, which differ from the unsnapped x and x + w.
+    const edges = .{ 13.6, 28.8 };
+    var buf: [8]Rect = undefined;
+    const horizontal = lineRects(0x2500, x, 0, w, h, &buf).?[0];
+    const vertical = lineRects(0x2502, x, 0, w, h, &buf).?[0];
+    for (0x256D..0x2571, [_]f32{ edges[1], edges[0], edges[0], edges[1] }, [_]f32{ h, h, 0, 0 }) |cp, edge_x, edge_y| {
+        const path = roundedPath(@intCast(cp), x, w, h, edges).?;
+        defer path.unref();
+        // GTK's C type is 16-byte aligned for vector instructions; the binding omits it.
+        var at: gsk.PathPoint align(16) = undefined;
+        var pos: Point = undefined;
+        try std.testing.expect(path.getStartPoint(&at) != 0);
+        at.getPosition(path, &pos);
+        try std.testing.expectEqual(Point{ .f_x = edge_x, .f_y = @floatCast((horizontal.y0 + horizontal.y1) / 2) }, pos);
+        try std.testing.expect(path.getEndPoint(&at) != 0);
+        at.getPosition(path, &pos);
+        try std.testing.expectEqual(Point{ .f_x = @floatCast((vertical.x0 + vertical.x1) / 2), .f_y = edge_y }, pos);
+    }
 }
 
 test "block characters are rectangles in shares of a cell" {
