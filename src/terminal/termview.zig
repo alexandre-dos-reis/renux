@@ -2182,15 +2182,12 @@ pub const TermView = struct {
         return !std.mem.startsWith(u8, v.server.url, "unix://");
     }
 
-    /// Whether Ctrl+click on a link is Renux's to open even though the program in the pane
-    /// takes the mouse. Given the click, a program on a remote host opens the link in a
-    /// browser on that host, where nobody is looking. On this computer the program keeps it.
     fn linksOpenHere(v: *const TermView) bool {
-        return settings.current.remote_links_here and v.onRemoteHost();
+        return !v.onRemoteHost() or settings.current.remote_links_here;
     }
 
-    /// Whether a Ctrl+click at a cell is kept from a program that takes the mouse, to open the
-    /// link there on this computer.
+    /// Ctrl+click opens a recognized link even when the local program takes the mouse.
+    /// Remote panes can opt out, but file previews still belong to Renux.
     fn keepsLinkClick(v: *TermView, t: *term_mod.Term, mods: u4, cell: struct { u16, u16 }) bool {
         if (mods & keys.ctrl == 0 or !v.programHasMouse(mods)) return false;
         const url = v.linkAt(t, cell[0], cell[1]) orelse return false;
@@ -3147,25 +3144,28 @@ fn buildRow(v: *TermView, f: *const term_mod.Frame, y: usize, f_font: Font) ?*gs
                 }
             }
             const width = @as(f64, @floatFromInt(run)) * v.cell_w;
+            // Straight lines and corners end at the same snapped pixel edge so they meet.
+            const snap_left = pixelX(v, left);
+            const snap_right = pixelX(v, left + width);
             var rects: [8]boxdraw.Rect = undefined;
             if (boxdraw.lineRects(cl.cp, left, 0, width, v.cell_h, &rects)) |strokes| {
-                // Strokes that reach the cell's sides end on whole screen pixels, where the
-                // neighbouring cell's begin: no faint gap where two lines meet.
-                const snap_left = pixelX(v, left);
-                const snap_right = pixelX(v, left + width);
                 for (strokes) |r| {
                     const x0 = if (r.x0 == left) snap_left else r.x0;
                     const x1 = if (r.x1 == left + width) snap_right else r.x1;
                     fillRect(sn, color, alpha, x0, r.y0, x1 - x0, r.y1 - r.y0);
                 }
-                x += run;
-                continue;
+            } else if (boxdraw.roundedPath(cl.cp, left, width, v.cell_h, .{ snap_left, snap_right })) |path| {
+                defer path.unref();
+                const stroke = gsk.Stroke.new(@floatCast(boxdraw.lineThickness(v.cell_h)));
+                defer stroke.free();
+                sn.appendStroke(path, stroke, &rgba(color, alpha));
+            } else {
+                const cr = sn.appendCairo(&.{ .f_origin = .{ .f_x = @floatCast(left - 1), .f_y = 0 }, .f_size = .{ .f_width = @floatCast(v.cell_w + 2), .f_height = @floatCast(v.cell_h) } });
+                setColor(cr, color, alpha);
+                boxdraw.draw(cr, cl.cp, left, 0, v.cell_w, v.cell_h);
+                cr.destroy();
             }
-            const cr = sn.appendCairo(&.{ .f_origin = .{ .f_x = @floatCast(left - 1), .f_y = 0 }, .f_size = .{ .f_width = @floatCast(v.cell_w + 2), .f_height = @floatCast(v.cell_h) } });
-            setColor(cr, cellColors(f, cl).fg, if (cl.flags.faint) 0.6 else 1);
-            boxdraw.draw(cr, cl.cp, left, 0, v.cell_w, v.cell_h);
-            cr.destroy();
-            x += 1;
+            x += run;
             continue;
         }
         const start = x;
