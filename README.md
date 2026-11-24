@@ -9,72 +9,34 @@ through libghostty-vt.
 Renux is an independent project, not made by the Rex team. It is early, so expect rough edges,
 and please report them as [issues](https://github.com/zenodea/renux/issues).
 
-![Renux over a desktop wallpaper: a sidebar of sessions, a shell, and two coding agents at work](docs/screenshots/panes.png)
-
 [![A minute of Renux: find and file peek in a shell, a floating pane, the activity panel, the agent board, the overview, a CRT shader, and the window without its background](docs/screenshots/demo.webp)](docs/screenshots/demo.mp4)
-
-*Click for the full-size video.*
 
 ## What it does
 
-- **Your Rex sessions, as they are.** Sessions, tabs and panes live on the Rex server, so they
-  are the same here, in the Rex app and on a phone. Key bindings come from your Rex config.
-  New tabs, splits and floating shells start in the source pane's current directory when
-  Rex can report it, even without shell integration.
-- **Fast terminals.** Text is drawn with libghostty-vt, with selection, find, links, box
-  drawing, and your own font and theme.
-- **Keyboard copying.** Copy mode holds the scrollback still while the program keeps running.
-  Move with Vim keys, search, select characters, lines or a rectangle, and yank to the clipboard.
-- **Every tab at once.** The overview zooms out from the tab you are on to a grid of all your
-  tabs, each drawn as its live terminals. A dot on a tab shows what each agent in it is doing.
-  Pick a tab and it zooms back in.
-- **Room for your panes.** Drag the sidebar's inner edge to resize it. Renux remembers the
-  width. Shortcuts fade as space runs out; the **⋯** menu at the bottom keeps their actions
-  within reach. Switch **Window background** off in Settings > Effects and the window draws
-  none: the panes, the sidebar and the board are cards with the desktop between them.
-- **Your agents at a glance.** Panes running coding agents show what they are doing, and the
-  agent board sorts them into Idle, Running, Attention and Done. In Settings > Server > Agents,
-  **Keep this computer awake while an agent is working** asks your desktop to prevent suspend
-  and idle sleep while any connected pane reports working. It is off by default and releases
-  when work stops, the switch goes off, or Renux closes. Your desktop has the final say.
-- **Files for remote panes.** Drop files, or paste copied files or a clipboard image with
-  Ctrl+Shift+V. Coding-agent panes also accept attachments with Ctrl+V. Rex uploads them and
-  inserts their remote paths, in order, once all have arrived. The first file's name shows at
-  the cursor and fills in as they go. Local panes insert local paths. Screenshots become PNG
-  files. Each file can be up to 100 MB.
-- **Peek at files.** Ctrl+click a file path to see the file by it, locally or remotely: the
-  lines around the one named, in syntax colors, a picture, or a PDF. In a PDF, Right/Left
-  and Page Down/Page Up turn pages; the name row shows the current page and total.
-  Enter opens the file in your
-  editor in a new pane to the right (`nvim` by default; the Editor command setting changes
-  it), and Shift+Enter in a new window. For a picture or PDF, Enter opens your desktop viewer. Hold
-  Ctrl to underline a detected path; Esc closes the peek. For paths with ambiguous spacing,
-  select the path and choose **Preview Selected Path** from the right-click menu, which
-  offers **Open With…** for other formats. **Quick Look** in the command palette lists the
-  files and links on the focused pane's screen; choose a file to peek at it. Web links open
-  your browser. Requires Rex API 13; files up to 16 MiB.
-- **Download from a remote pane.** Ctrl+click a folder's path to see what is in it; Enter
-  copies the whole folder to this computer's Downloads folder. In a file's peek, Ctrl+D (or
-  the **Download** button) does the same for the file, whatever its size. A message at the
-  foot of the window shows how far it has got, with **Cancel**, and then **Show** to find it
-  in your files app. Nothing is written over: a name that is taken gets a number, as in
-  `notes (2).md`. Links to folders and files that can't be read are left out and counted.
-  For a folder on this computer, Enter opens it in your files app.
-- **Remote development links.** Ctrl+click an HTTP(S) localhost link with a port in a remote
-  pane: Renux forwards it to a free port on this computer and opens the same path and query in
-  your browser. Repeated clicks reuse the forward. **Forward Port…** in Commands discovers
-  the focused pane's listening ports, accepts a port or `host:port`, and shows the forwards
-  this window carries, with a close button for each. Requires a Rex CLI/server with port
-  forwarding; port discovery needs Rex API 15. Local panes keep opening links directly.
-- **Several servers.** Connect to more than one Rex server, on this computer, over Tailscale,
-  or through SSH (`user@box` or `ssh://user@box:2222`), and be told when one could be updated.
-  SSH uses your system's keys, config and agent, with one connection shared by terminals and
-  file transfers. Trust the host and unlock your key in a terminal first; Renux does not answer
-  SSH questions yet. Remote hosts can answer to this computer's keys and keep their own colors.
-  See [SSH hosts](docs/ssh-hosts.md).
-- **Made to look at.** Themes, a see-through window with the desktop's blur behind it, and
-  custom GLSL shaders as in Ghostty: ten ship with Renux, from a CRT to a cursor that smears as
-  it moves.
+- **Your Rex sessions, as they are.** Sessions, tabs, panes and key bindings come from the Rex
+  server, so they match the Rex app and your phone.
+- **Fast terminals.** Drawn with libghostty-vt, with selection, find, links, and your own font
+  and theme.
+- **Keyboard copying.** [Copy mode](docs/copy-mode.md) holds the scrollback still while you
+  search and select with Vim keys.
+- **Every tab at once.** The overview zooms out to a live grid of all your tabs, with a dot for
+  each agent's state.
+- **Room for your panes.** Resize the sidebar, or turn off the window background so panes float
+  as cards over your desktop.
+- **Your agents at a glance.** Panes show what their coding agent is doing, and the agent board
+  sorts them by state. Renux can [keep the computer awake](docs/keep-awake.md) while they work.
+- **Files for remote panes.** Drop or paste files into a remote pane: Rex uploads them and types
+  their paths. See [file transfers](docs/file-transfers.md).
+- **Peek at files.** Ctrl+click a file path to preview it, local or remote: code, pictures or
+  PDFs. See [file previews](docs/file-preview.md).
+- **Download from a remote pane.** Copy a remote file or folder to your Downloads folder
+  straight from its peek.
+- **Remote development links.** Ctrl+click a `localhost` link in a remote pane and Renux forwards
+  the port and opens it in your browser. See [port forwarding](docs/port-forwarding.md).
+- **Several servers.** Connect to Rex on this computer, over Tailscale, or through SSH. See
+  [SSH hosts](docs/ssh-hosts.md).
+- **Made to look at.** Themes, a see-through window with your desktop's blur, and ten GLSL
+  shaders, from a CRT to a cursor that smears as it moves.
 
 | Agent Board | Overview |
 |---|---|
