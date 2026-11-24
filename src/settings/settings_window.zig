@@ -927,6 +927,7 @@ fn themesPage(ctx: *Ctx) *gtk.Widget {
     const look = group(p, "Appearance");
     cards(ctx, look, "Color scheme", settings.ColorScheme, &settings.current.color_scheme, &.{ "Auto", "Light", "Dark" }, &.{ .scheme_auto, .scheme_light, .scheme_dark }, App.themeChanged);
     switchRow(ctx, look, "Separate light and dark themes", "Follow the system's appearance with a theme for each", &settings.current.theme_follow_system, App.themeChanged);
+    switchRow(ctx, look, "Use colors from system theme", "Color the window from the GTK theme instead of the terminal theme", &settings.current.desktop_colors, App.desktopColorsChanged);
     slotRow(ctx, look, "Light theme", &settings.current.theme_light);
     slotRow(ctx, look, "Dark theme", &settings.current.theme_dark);
     const g = group(p, "Terminal Theme");

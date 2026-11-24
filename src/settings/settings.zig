@@ -24,6 +24,8 @@ pub const Settings = struct {
     tight: bool = false,
     show_headers: bool = true,
     color_scheme: ColorScheme = .auto,
+    /// The desktop's GTK colors (~/.config/gtk-4.0/gtk.css) go over the theme's in the window.
+    desktop_colors: bool = false,
     brand_icons: bool = true,
     cursor_style: CursorStyle = .program,
     cursor_blink: bool = true,

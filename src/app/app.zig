@@ -454,6 +454,7 @@ pub const App = struct {
     was_online: bool = false,
     /// The shown session was chosen by the app, not the person.
     auto_picked: bool = false,
+    base_css: ?*gtk.CssProvider = null,
     theme_css: ?*gtk.CssProvider = null,
     look_css: ?*gtk.CssProvider = null,
     last_dark: bool = true,
@@ -515,7 +516,8 @@ pub const App = struct {
         }
         const provider = gtk.CssProvider.new();
         provider.loadFromString(css);
-        gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, provider.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_APPLICATION);
+        gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, provider.as(gtk.StyleProvider), colorPriority());
+        a.base_css = provider;
 
         a.applyTheme();
         useAppIcon();
@@ -1618,12 +1620,26 @@ pub const App = struct {
         out.writer.writeByte(0) catch return;
         const provider = a.theme_css orelse blk: {
             const p = gtk.CssProvider.new();
-            gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, p.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_APPLICATION);
+            gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, p.as(gtk.StyleProvider), colorPriority());
             a.theme_css = p;
             break :blk p;
         };
         provider.loadFromString(@ptrCast(out.written().ptr));
         adw.StyleManager.getDefault().setColorScheme(if (palette.dark) .force_dark else .force_light);
+    }
+
+    /// The user's gtk.css, often a desktop shell's colors, sits at USER priority: above it the
+    /// theme wins, below it the desktop's colors do.
+    fn colorPriority() u32 {
+        return if (settings.current.desktop_colors) gtk.STYLE_PROVIDER_PRIORITY_APPLICATION else gtk.STYLE_PROVIDER_PRIORITY_USER;
+    }
+
+    pub fn desktopColorsChanged(a: *App) void {
+        const d = gdk.Display.getDefault() orelse return;
+        for ([_]?*gtk.CssProvider{ a.base_css, a.theme_css }) |p| if (p) |pr| {
+            gtk.StyleContext.removeProviderForDisplay(d, pr.as(gtk.StyleProvider));
+            gtk.StyleContext.addProviderForDisplay(d, pr.as(gtk.StyleProvider), colorPriority());
+        };
     }
 
     fn showState(a: *App) void {
@@ -4185,7 +4201,7 @@ pub const App = struct {
         termview.term_opacity = prefs.terminal_opacity;
         const provider = a.look_css orelse blk: {
             const p = gtk.CssProvider.new();
-            gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, p.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+            gtk.StyleContext.addProviderForDisplay(gdk.Display.getDefault().?, p.as(gtk.StyleProvider), gtk.STYLE_PROVIDER_PRIORITY_USER + 1);
             a.look_css = p;
             break :blk p;
         };
