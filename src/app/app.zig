@@ -56,6 +56,7 @@ const css =
     \\.pick-card { padding: 5px 5px 7px 5px; border-radius: 13px; font-weight: 400; color: @renux_secondary; transition: box-shadow 140ms ease-out, background-color 140ms ease-out; }
     \\.pick-card:checked { background-color: alpha(@accent_bg_color, 0.12); box-shadow: inset 0 0 0 2px @accent_bg_color; color: @window_fg_color; font-weight: 700; }
     \\.settings-sample-row { padding: 12px; }
+    \\.host-icon-card { padding: 8px 4px 6px 4px; font-size: 0.85em; }
     \\.board { background-color: @renux_shell; padding: 14px 14px 12px 14px; }
     \\.panes.under-board { opacity: 0; transition: opacity 200ms ease-in; }
     \\.panes.under-board.at-once { transition: none; }
@@ -1409,6 +1410,24 @@ pub const App = struct {
         }
     }
 
+    /// A saved host was renamed or given another icon in Settings: everything that shows its
+    /// name or icon follows.
+    pub fn hostEdited(a: *App, url: []const u8) void {
+        const clean = std.mem.trimEnd(u8, url, "/");
+        for (a.hosts.items) |h| {
+            if (!std.mem.eql(u8, h.server.url, clean)) continue;
+            for (settings.current.hosts.items) |saved| if (std.mem.eql(u8, saved.url, clean)) {
+                if (!std.mem.eql(u8, saved.label, h.label)) if (gpa.dupe(u8, saved.label)) |copy| {
+                    gpa.free(h.label);
+                    h.label = copy;
+                } else |_| {};
+            };
+        }
+        a.rebuildSidebar();
+        a.overview.changed();
+        a.board.changed();
+    }
+
     pub fn removeHost(a: *App, h: *Host) void {
         for (a.hosts.items, 0..) |x, i| if (x == h) {
             _ = a.hosts.orderedRemove(i);
@@ -1940,7 +1959,7 @@ pub const App = struct {
         const above = settings.current.tab_position == .above;
         for (a.hosts.items) |h| {
             if (a.filter) |f| if (f != h) continue;
-            if (several) plan.append(gpa, .{ .kind = .host, .host = h, .key = hashParts(&.{ "host", h.page }) }) catch return;
+            if (several) plan.append(gpa, .{ .kind = .host, .host = h, .key = hostKey(h) }) catch return;
             const s = h.server;
             for (s.sessions.items) |*session| {
                 const collapsed = a.collapsed.contains(session.id);
@@ -1971,7 +1990,7 @@ pub const App = struct {
         const several = a.hosts.items.len > 1 and a.filter == null;
         for (a.hosts.items) |h| {
             if (a.filter) |f| if (f != h) continue;
-            if (several) plan.append(gpa, .{ .kind = .host, .host = h, .key = hashParts(&.{ "host", h.page }) }) catch return;
+            if (several) plan.append(gpa, .{ .kind = .host, .host = h, .key = hostKey(h) }) catch return;
             const s = h.server;
             for (s.sessions.items) |*session| {
                 const v = s.sessionView(session.id) orelse continue;
@@ -2076,6 +2095,11 @@ pub const App = struct {
     }
 
     /// A host's name, with how its connection is doing when it isn't connected.
+    /// A host's heading is made again when its icon changes; its name is changed in place.
+    fn hostKey(h: *Host) u64 {
+        return hashParts(&.{ "host", h.page, @tagName(settings.iconFor(h.server.url)) });
+    }
+
     fn hostHeading(buf: []u8, h: *Host) [:0]const u8 {
         return (switch (h.server.state) {
             .online => std.fmt.bufPrintSentinel(buf, "{s}", .{h.label}, 0),
@@ -2121,12 +2145,16 @@ pub const App = struct {
         var buf: [256]u8 = undefined;
         switch (want.kind) {
             .host => {
+                const line = gtk.Box.new(.horizontal, 6);
+                line.as(gtk.Widget).addCssClass("host-heading");
+                line.append(icons.image(icons.host(settings.iconFor(h.server.url)), 14));
                 const label = gtk.Label.new(hostHeading(&buf, h).ptr);
                 label.setXalign(0);
                 label.setEllipsize(.end);
-                label.as(gtk.Widget).addCssClass("host-heading");
+                label.as(gtk.Widget).setHexpand(1);
+                line.append(label.as(gtk.Widget));
                 const row = gtk.ListBoxRow.new();
-                row.setChild(label.as(gtk.Widget));
+                row.setChild(line.as(gtk.Widget));
                 row.setActivatable(0);
                 row.setSelectable(0);
                 row.as(gtk.Widget).addCssClass("host-row");

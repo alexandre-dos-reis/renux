@@ -577,6 +577,7 @@ pub const Board = struct {
             for (sorted.items) |c| {
                 hasher.update(std.mem.asBytes(&c));
                 hasher.update(Order.groupName(grouping, c));
+                if (grouping == .host) hasher.update(@tagName(settings.iconFor(c.host.server.url)));
             }
             const sig = hasher.final() | 1;
             const list = b.lists[k];
@@ -588,11 +589,15 @@ pub const Board = struct {
                     if (grouping != .none and Order.rank(grouping, c) != last_rank) {
                         last_rank = Order.rank(grouping, c);
                         var zbuf: [97]u8 = undefined;
+                        const heading = gtk.Box.new(.horizontal, 5);
+                        heading.as(gtk.Widget).addCssClass("board-session");
+                        // A host's name comes after its icon, as in the sidebar.
+                        if (grouping == .host) heading.append(icons.image(icons.host(settings.iconFor(c.host.server.url)), 13));
                         const name = gtk.Label.new(zt(&zbuf, Order.groupName(grouping, c)).ptr);
                         name.setXalign(0);
                         name.setEllipsize(.end);
-                        name.as(gtk.Widget).addCssClass("board-session");
-                        list.append(name.as(gtk.Widget));
+                        heading.append(name.as(gtk.Widget));
+                        list.append(heading.as(gtk.Widget));
                     }
                     // A card moving left, as from Done to Idle, is still in the list of the column
                     // it left, which is laid out after this one; GTK won't add it here until it

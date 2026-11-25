@@ -6,9 +6,17 @@ const gdk = @import("gdk");
 const cairo = @import("cairo");
 const rsvg = @import("rsvg");
 const table = @import("ui_icons.zig");
+const settings = @import("../settings/settings.zig");
 const draw_util = @import("../util/draw.zig");
 
-pub const Kind = enum { sidebar, more, plus, split_right, split_down, float, zoom, close, terminal, server, gear, palette, interface, keyboard, search, bell, up, down, right, new_session, add_host, filter, minimize, board, eye, effects, overview };
+pub const Kind = enum { sidebar, more, plus, split_right, split_down, float, zoom, close, terminal, server, gear, palette, interface, keyboard, search, bell, up, down, right, new_session, add_host, filter, minimize, board, eye, effects, overview, host_laptop, host_desktop, host_server, host_cloud, host_storage, host_board, host_router, host_phone, host_home, host_work, host_game, host_lab };
+
+/// The icon for what a host is.
+pub fn host(icon: settings.HostIcon) Kind {
+    return switch (icon) {
+        inline else => |i| @field(Kind, "host_" ++ @tagName(i)),
+    };
+}
 
 pub fn image(kind: Kind, size: c_int) *gtk.Widget {
     const area = gtk.DrawingArea.new();
