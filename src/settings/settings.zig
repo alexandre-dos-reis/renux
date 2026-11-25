@@ -17,7 +17,31 @@ pub const PaddingColor = enum { terminal, theme };
 /// session's name, or under each host's.
 pub const Grouping = enum { none, session, host };
 
-pub const Host = struct { label: []u8, url: []u8 };
+/// What a host is shown as beside its name: the kind of computer it is.
+pub const HostIcon = enum { laptop, desktop, server, cloud, storage, board, router, phone, home, work, game, lab };
+
+/// A saved host. Without an icon of its own it shows as a laptop when it is this computer's
+/// server and as a server otherwise.
+pub const Host = struct {
+    label: []u8,
+    url: []u8,
+    icon: ?HostIcon = null,
+
+    pub fn shownIcon(h: Host) HostIcon {
+        return h.icon orelse defaultIcon(h.url);
+    }
+};
+
+pub fn defaultIcon(url: []const u8) HostIcon {
+    return if (std.mem.startsWith(u8, url, "unix://")) .laptop else .server;
+}
+
+/// The icon a host with this address shows: its own if it was saved with one.
+pub fn iconFor(url: []const u8) HostIcon {
+    const clean = std.mem.trimEnd(u8, url, "/");
+    for (current.hosts.items) |h| if (std.mem.eql(u8, h.url, clean)) return h.shownIcon();
+    return defaultIcon(clean);
+}
 
 /// A key sequence set in Renux for an action, over the config's own. Empty keys unbind it.
 pub const Shortcut = struct { keys: []u8, action: []u8, args: []u8 };
@@ -396,15 +420,21 @@ fn toKeyFile(s: *const Settings) error{OutOfMemory}!*glib.KeyFile {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const al = arena.allocator();
-    // Hosts are stored as matching lists of labels and addresses.
+    // Hosts are stored as matching lists of labels, addresses and icons. Icons are only
+    // written once a host has one picked, so a file with none stays as it was.
     const labels = try al.alloc([]const u8, s.hosts.items.len);
     const urls = try al.alloc([]const u8, s.hosts.items.len);
-    for (s.hosts.items, labels, urls) |h, *l, *u| {
+    const host_icons = try al.alloc([]const u8, s.hosts.items.len);
+    var any_icon = false;
+    for (s.hosts.items, labels, urls, host_icons) |h, *l, *u, *ic| {
         l.* = h.label;
         u.* = h.url;
+        ic.* = if (h.icon) |i| @tagName(i) else "";
+        if (h.icon != null) any_icon = true;
     }
     try writeList(kf, "hosts", "labels", labels);
     try writeList(kf, "hosts", "urls", urls);
+    if (any_icon) try writeList(kf, "hosts", "icons", host_icons);
     try writeList(kf, "paths", "recent", s.recent_paths.items);
     try writeList(kf, "links", "trusted", s.trusted_schemes.items);
     // Each shortcut is "keys<TAB>action<TAB>args".
@@ -515,13 +545,21 @@ pub fn load() void {
     {
         var labels: std.ArrayList([]u8) = .empty;
         var urls: std.ArrayList([]u8) = .empty;
-        defer for ([_]*std.ArrayList([]u8){ &labels, &urls }) |list| {
+        var host_icons: std.ArrayList([]u8) = .empty;
+        defer for ([_]*std.ArrayList([]u8){ &labels, &urls, &host_icons }) |list| {
             for (list.items) |l| gpa.free(l);
             list.deinit(gpa);
         };
         readList(kf, "hosts", "labels", &labels);
         readList(kf, "hosts", "urls", &urls);
-        for (0..@min(labels.items.len, urls.items.len)) |i| addHostNoSave(labels.items[i], urls.items[i]);
+        readList(kf, "hosts", "icons", &host_icons);
+        for (0..@min(labels.items.len, urls.items.len)) |i| {
+            addHostNoSave(labels.items[i], urls.items[i]);
+            const icon = if (i < host_icons.items.len) std.meta.stringToEnum(HostIcon, host_icons.items[i]) else null;
+            if (icon) |ic| for (current.hosts.items) |*h| if (std.mem.eql(u8, h.url, std.mem.trimEnd(u8, urls.items[i], "/"))) {
+                h.icon = ic;
+            };
+        }
     }
     if (base) |old| old.unref();
     base = toKeyFile(&current) catch null;
@@ -604,6 +642,34 @@ pub fn addHost(label: []const u8, url: []const u8) void {
     // Written at once: a window opened next is another process, which reads the file.
     save();
     flush();
+}
+
+/// Gives the saved host with this address another name. A name left empty is the one made
+/// from the address. False if no saved host has the address.
+pub fn renameHost(url: []const u8, label: []const u8) bool {
+    const h = savedHost(url) orelse return false;
+    const name = std.mem.trim(u8, label, " \t");
+    const copy = gpa.dupe(u8, if (name.len > 0) name else labelFor(h.url)) catch return false;
+    gpa.free(h.label);
+    h.label = copy;
+    save();
+    flush();
+    return true;
+}
+
+/// Shows the saved host with this address as `icon`. False if no saved host has the address.
+pub fn setHostIcon(url: []const u8, icon: HostIcon) bool {
+    const h = savedHost(url) orelse return false;
+    h.icon = icon;
+    save();
+    flush();
+    return true;
+}
+
+fn savedHost(url: []const u8) ?*Host {
+    const clean = std.mem.trimEnd(u8, url, "/");
+    for (current.hosts.items) |*h| if (std.mem.eql(u8, h.url, clean)) return h;
+    return null;
 }
 
 pub fn removeHost(index: usize) void {
@@ -878,6 +944,40 @@ test "grouping by session from before By host is kept, and a newer choice wins" 
     const text = try readTestFile();
     defer gpa.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "overview-grouping=session") != null);
+}
+
+test "a host keeps the name and icon picked for it" {
+    const root = try testFolder("[hosts]\nlabels=This Computer;box;\nurls=unix:///run/rex.sock;http://box:8765;\n");
+    defer removeTestFolder(root);
+    const forget = struct {
+        fn hosts() void {
+            for (current.hosts.items) |h| {
+                gpa.free(h.label);
+                gpa.free(h.url);
+            }
+            current.hosts.clearRetainingCapacity();
+        }
+    }.hosts;
+    forget();
+    defer forget();
+    load();
+    try std.testing.expectEqual(HostIcon.laptop, iconFor("unix:///run/rex.sock"));
+    try std.testing.expectEqual(HostIcon.server, iconFor("http://box:8765/"));
+    try std.testing.expect(renameHost("http://box:8765", "  Basement Pi "));
+    try std.testing.expect(setHostIcon("http://box:8765", .board));
+    try std.testing.expect(!renameHost("http://elsewhere:1", "x"));
+    const text = try readTestFile();
+    defer gpa.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "labels=This Computer;Basement Pi;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "icons=;board;") != null);
+    forget();
+    load();
+    try std.testing.expectEqualStrings("Basement Pi", current.hosts.items[1].label);
+    try std.testing.expectEqual(HostIcon.board, iconFor("http://box:8765"));
+    try std.testing.expectEqual(@as(?HostIcon, null), current.hosts.items[0].icon);
+    // An empty name goes back to the one made from the address.
+    try std.testing.expect(renameHost("http://box:8765", ""));
+    try std.testing.expectEqualStrings("box", current.hosts.items[1].label);
 }
 
 test "a settings file that can't be read is left alone" {

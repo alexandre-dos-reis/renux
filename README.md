@@ -147,6 +147,10 @@ exactly the same text formatter as mouse selection. [Copy-mode details and actio
 A remote host answers to its own Rex config. For the same keys everywhere, turn on
 Settings > Remote Hosts > Use this computer's keys on remote hosts.
 
+To rename a host or give it an icon (a laptop, a server, a cloud machine, a Raspberry Pi and
+more), open its row in Settings > Remote Hosts. The name and icon show in the sidebar, the
+overview and the agent board.
+
 Ctrl+click remote links to `localhost`, `127.0.0.1`, `[::1]` or `0.0.0.0` with an explicit
 port to forward and open them. Bind `client.host.forward_port` in your Rex config, or choose
 **Forward Port…** in Commands, to discover ports, enter a target, or close a forward.

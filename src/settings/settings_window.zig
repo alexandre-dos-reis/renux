@@ -1246,6 +1246,124 @@ fn developerPage(ctx: *Ctx) *gtk.Widget {
 
 const HostRow = struct { ctx: *Ctx, index: usize };
 
+/// A saved host's row, which opens to change its name and icon. It finds the host by its
+/// address, which stays the same while the host is renamed.
+const HostEdit = struct {
+    ctx: *Ctx,
+    url: [:0]const u8,
+    row: *adw.ExpanderRow,
+    /// Holds the icon at the row's start, which is swapped for another when one is picked.
+    icon_slot: *gtk.Box,
+};
+
+const IconPick = struct { edit: *HostEdit, icon: settings.HostIcon };
+
+const host_icon_names = [_][:0]const u8{ "Laptop", "Desktop", "Server", "Cloud", "Storage", "Dev Board", "Router", "Phone", "Home", "Work", "Gaming", "Lab" };
+
+comptime {
+    std.debug.assert(host_icon_names.len == std.enums.values(settings.HostIcon).len);
+}
+
+/// The row for one saved host: its icon, name and address, with its name and icon to edit
+/// when it is opened.
+fn hostRow(ctx: *Ctx, g: *adw.PreferencesGroup, h: settings.Host, index: usize) void {
+    const row = adw.ExpanderRow.new();
+    if (gpa.dupeSentinel(u8, h.label, 0)) |z| {
+        defer gpa.free(z);
+        row.as(adw.PreferencesRow).setTitle(z.ptr);
+    } else |_| {}
+    if (gpa.dupeSentinel(u8, h.url, 0)) |z| {
+        defer gpa.free(z);
+        row.setSubtitle(z.ptr);
+    } else |_| {}
+    const slot = gtk.Box.new(.horizontal, 0);
+    slot.as(gtk.Widget).setValign(.center);
+    slot.append(icons.image(icons.host(h.shownIcon()), 18));
+    row.addPrefix(slot.as(gtk.Widget));
+    const remove = gtk.Button.newWithLabel("Remove");
+    remove.as(gtk.Widget).setValign(.center);
+    remove.as(gtk.Widget).addCssClass("destructive-action");
+    row.addSuffix(remove.as(gtk.Widget));
+    g.add(row.as(gtk.Widget));
+    if (ctx.keep(HostRow{ .ctx = ctx, .index = index })) |hr| {
+        _ = gtk.Button.signals.clicked.connect(remove, *HostRow, &removeHost, hr, .{});
+    }
+    const url = ctx.al().dupeSentinel(u8, h.url, 0) catch return;
+    const edit = ctx.keep(HostEdit{ .ctx = ctx, .url = url, .row = row, .icon_slot = slot }) orelse return;
+
+    const name = adw.EntryRow.new();
+    name.as(adw.PreferencesRow).setTitle("Name");
+    if (gpa.dupeSentinel(u8, h.label, 0)) |z| {
+        defer gpa.free(z);
+        name.as(gtk.Editable).setText(z.ptr);
+    } else |_| {}
+    name.setShowApplyButton(1);
+    _ = adw.EntryRow.signals.apply.connect(name, *HostEdit, &hostNameApplied, edit, .{});
+    row.addRow(name.as(gtk.Widget));
+
+    const column = gtk.Box.new(.vertical, 8);
+    column.as(gtk.Widget).addCssClass("settings-cards");
+    const heading = gtk.Label.new("Icon");
+    heading.setXalign(0);
+    heading.as(gtk.Widget).addCssClass("settings-cards-title");
+    column.append(heading.as(gtk.Widget));
+    // Two even rows of six, each icon with its name under it, lit while it is the one shown.
+    var strip: *gtk.Box = undefined;
+    var first: ?*gtk.ToggleButton = null;
+    for (std.enums.values(settings.HostIcon), host_icon_names, 0..) |icon, label, i| {
+        if (i % 6 == 0) {
+            strip = gtk.Box.new(.horizontal, 8);
+            strip.setHomogeneous(1);
+            column.append(strip.as(gtk.Widget));
+        }
+        const b = gtk.ToggleButton.new();
+        const card = gtk.Box.new(.vertical, 4);
+        card.append(icons.image(icons.host(icon), 22));
+        const caption = gtk.Label.new(label.ptr);
+        caption.setEllipsize(.end);
+        card.append(caption.as(gtk.Widget));
+        b.as(gtk.Button).setChild(card.as(gtk.Widget));
+        b.as(gtk.Widget).addCssClass("pick-card");
+        b.as(gtk.Widget).addCssClass("host-icon-card");
+        b.as(gtk.Widget).addCssClass("flat");
+        b.as(gtk.Widget).setHexpand(1);
+        if (first) |fb| b.setGroup(fb) else first = b;
+        b.setActive(@intFromBool(h.shownIcon() == icon));
+        strip.append(b.as(gtk.Widget));
+        const pick = ctx.keep(IconPick{ .edit = edit, .icon = icon }) orelse continue;
+        _ = gtk.ToggleButton.signals.toggled.connect(b, *IconPick, &hostIconPicked, pick, .{});
+    }
+    const holder = adw.PreferencesRow.new();
+    holder.as(gtk.ListBoxRow).setActivatable(0);
+    holder.as(gtk.Widget).setFocusable(0);
+    holder.as(gtk.Widget).addCssClass("settings-plain-row");
+    holder.as(gtk.ListBoxRow).setChild(column.as(gtk.Widget));
+    row.addRow(holder.as(gtk.Widget));
+}
+
+fn hostNameApplied(entry: *adw.EntryRow, edit: *HostEdit) callconv(.c) void {
+    if (!settings.renameHost(edit.url, std.mem.span(entry.as(gtk.Editable).getText()))) return;
+    for (settings.current.hosts.items) |h| if (std.mem.eql(u8, h.url, std.mem.trimEnd(u8, edit.url, "/"))) {
+        // An empty name went back to the one made from the address; the entry shows it.
+        if (gpa.dupeSentinel(u8, h.label, 0)) |z| {
+            defer gpa.free(z);
+            edit.row.as(adw.PreferencesRow).setTitle(z.ptr);
+            if (!std.mem.eql(u8, std.mem.span(entry.as(gtk.Editable).getText()), z)) entry.as(gtk.Editable).setText(z.ptr);
+        } else |_| {}
+    };
+    edit.ctx.app.hostEdited(edit.url);
+}
+
+fn hostIconPicked(button: *gtk.ToggleButton, pick: *IconPick) callconv(.c) void {
+    if (button.getActive() == 0) return;
+    const edit = pick.edit;
+    if (!settings.setHostIcon(edit.url, pick.icon)) return;
+    const slot = edit.icon_slot;
+    while (slot.as(gtk.Widget).getFirstChild()) |child| slot.remove(child);
+    slot.append(icons.image(icons.host(pick.icon), 18));
+    edit.ctx.app.hostEdited(edit.url);
+}
+
 fn hostsPage(ctx: *Ctx) *gtk.Widget {
     const p = page();
     const remote = group(p, "Keys, Colors and Links");
@@ -1253,17 +1371,8 @@ fn hostsPage(ctx: *Ctx) *gtk.Widget {
     switchRow(ctx, remote, "Use each remote host's own colors", "Panes on a remote host take that host's terminal colors instead of the theme picked here", &settings.current.remote_colors, App.remoteOptionsChanged);
     switchRow(ctx, remote, "Open remote links on this computer", "Ctrl+click on a link in a remote host's pane opens it here, rather than leaving it to the program there, which opens it on that host", &settings.current.remote_links_here, null);
     const g = group(p, "Remote Hosts");
-    for (settings.current.hosts.items, 0..) |h, i| {
-        const row = adw.ActionRow.new();
-        setRowText(row, h.label, h.url);
-        const remove = gtk.Button.newWithLabel("Remove");
-        remove.as(gtk.Widget).setValign(.center);
-        remove.as(gtk.Widget).addCssClass("destructive-action");
-        row.addSuffix(remove.as(gtk.Widget));
-        g.add(row.as(gtk.Widget));
-        const hr = ctx.keep(HostRow{ .ctx = ctx, .index = i }) orelse continue;
-        _ = gtk.Button.signals.clicked.connect(remove, *HostRow, &removeHost, hr, .{});
-    }
+    if (settings.current.hosts.items.len > 0) g.setDescription("Open a host to give it another name, or an icon for the kind of computer it is");
+    for (settings.current.hosts.items, 0..) |h, i| hostRow(ctx, g, h, i);
     if (settings.current.hosts.items.len == 0) {
         const row = adw.ActionRow.new();
         row.as(adw.PreferencesRow).setTitle("No saved hosts");

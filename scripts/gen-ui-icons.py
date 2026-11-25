@@ -36,6 +36,19 @@ KINDS = [
     ("eye", "visibility", ""),
     ("effects", "auto_awesome", ""),
     ("overview", "grid_view", ""),
+    # What a host can be shown as, picked in Settings > Remote Hosts.
+    ("host_laptop", "laptop", ""),
+    ("host_desktop", "desktop_windows", ""),
+    ("host_server", "dns", ""),
+    ("host_cloud", "cloud", ""),
+    ("host_storage", "storage", ""),
+    ("host_board", "developer_board", ""),
+    ("host_router", "router", ""),
+    ("host_phone", "smartphone", ""),
+    ("host_home", "home", ""),
+    ("host_work", "work", ""),
+    ("host_game", "sports_esports", ""),
+    ("host_lab", "science", ""),
 ]
 
 folder = sys.argv[1]

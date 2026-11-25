@@ -39,6 +39,7 @@ const Workspace = workspace_mod.Workspace;
 const K = @import("../terminal/keys.zig");
 const programs = @import("../icons/programs.zig");
 const settings = @import("../settings/settings.zig");
+const icons = @import("../icons/icons.zig");
 const wayland = @import("../platform/wayland.zig");
 
 const gpa = std.heap.c_allocator;
@@ -94,8 +95,10 @@ const Tile = struct {
     session_id: []u8,
     window_id: []u8,
     label: *gtk.Label,
-    /// The host's name in the tab's top left corner, for a tab on another computer.
-    host_chip: *gtk.Label,
+    /// The host's icon and name in the tab's top left corner, for a tab on another computer,
+    /// and what they were made from, so they are made again only when the host is edited.
+    host_chip: *gtk.Box,
+    chip_for: u64 = 0,
     /// One dot for each agent in the tab, in its top right corner, and what they were made
     /// from, so they are made again only when an agent's state changes.
     badges: *gtk.Box,
@@ -131,7 +134,8 @@ const Group = struct {
     count: usize,
     rect: [4]f64 = .{ 0, 0, 0, 0 },
     card: *gtk.Widget,
-    label: *gtk.Label,
+    /// Its name, after the host's icon when the tabs are grouped by host.
+    label: *gtk.Widget,
 };
 
 /// A new tab was asked for in a session. It is gone to when the server shows it: the first tab
@@ -578,7 +582,7 @@ pub const Overview = struct {
     fn regroup(o: *Overview) void {
         for (o.groups.items) |g| {
             g.card.unparent();
-            g.label.as(gtk.Widget).unparent();
+            g.label.unparent();
         }
         o.groups.clearRetainingCapacity();
         const grouping = settings.current.overview_grouping;
@@ -593,23 +597,27 @@ pub const Overview = struct {
             card.as(gtk.Widget).addCssClass("overview-group");
             card.as(gtk.Widget).setCanTarget(0);
             card.as(gtk.Widget).setParent(o.widget());
-            const label = gtk.Label.new(null);
-            label.as(gtk.Widget).addCssClass("overview-name");
+            const heading = gtk.Box.new(.horizontal, 6);
+            heading.as(gtk.Widget).addCssClass("overview-name");
             // A session's name is told from its tabs' where there is no card around them.
-            label.as(gtk.Widget).addCssClass("overview-session");
+            heading.as(gtk.Widget).addCssClass("overview-session");
             // A session's name is lit like the name of the tab the ring is on, not dimmed.
-            label.as(gtk.Widget).addCssClass("chosen");
-            label.as(gtk.Widget).setCanTarget(0);
-            label.setEllipsize(.end);
+            heading.as(gtk.Widget).addCssClass("chosen");
+            heading.as(gtk.Widget).setCanTarget(0);
+            if (grouping == .host) heading.append(icons.image(icons.host(settings.iconFor(first.host.server.url)), 14));
+            const text = gtk.Label.new(null);
+            text.setEllipsize(.end);
+            heading.append(text.as(gtk.Widget));
             var name: [200]u8 = undefined;
             const group_name = if (grouping == .host) first.host.label else for (first.host.server.sessions.items) |se| {
                 if (std.mem.eql(u8, se.id, first.session_id)) break se.label;
             } else "Session";
-            if (std.fmt.bufPrintSentinel(&name, "{s}", .{group_name}, 0)) |z| label.setText(z.ptr) else |_| {}
-            label.as(gtk.Widget).setParent(o.widget());
+            if (std.fmt.bufPrintSentinel(&name, "{s}", .{group_name}, 0)) |z| text.setText(z.ptr) else |_| {}
+            const label = heading.as(gtk.Widget);
+            label.setParent(o.widget());
             o.groups.append(gpa, .{ .first = i, .count = j - i, .card = card.as(gtk.Widget), .label = label }) catch {
                 card.as(gtk.Widget).unparent();
-                label.as(gtk.Widget).unparent();
+                label.unparent();
             };
             i = j;
         }
@@ -643,6 +651,25 @@ pub const Overview = struct {
             const name = t.label.as(gtk.Widget);
             if (i == o.selected) name.addCssClass("chosen") else name.removeCssClass("chosen");
         }
+    }
+
+    /// Puts the host's icon and name in a tab's chip, again only when either changed.
+    fn fillChip(t: *Tile) void {
+        const h = t.host;
+        const icon = settings.iconFor(h.server.url);
+        var hasher = std.hash.Wyhash.init(@backingInt(icon));
+        hasher.update(h.label);
+        const made_from = hasher.final() | 1;
+        if (made_from == t.chip_for) return;
+        t.chip_for = made_from;
+        const chip = t.host_chip;
+        while (chip.as(gtk.Widget).getFirstChild()) |child| chip.remove(child);
+        chip.append(icons.image(icons.host(icon), 12));
+        const name = gtk.Label.new(null);
+        name.setEllipsize(.end);
+        var host_name: [128]u8 = undefined;
+        if (std.fmt.bufPrintSentinel(&host_name, "{s}", .{h.label}, 0)) |z| name.setText(z.ptr) else |_| {}
+        chip.append(name.as(gtk.Widget));
     }
 
     /// The tabs changed on a server: the grid follows.
@@ -761,6 +788,7 @@ pub const Overview = struct {
                     std.fmt.bufPrintSentinel(&name, "{s} · {s}", .{ session.label, tab_name }, 0) catch "Tab";
                 tile.label.setText(text.ptr);
                 // Grouped by host, the group's name says which computer; the chip would repeat it.
+                fillChip(&tile);
                 tile.host_chip.as(gtk.Widget).setVisible(@intFromBool(h.remote() and grouping != .host));
                 o.markAgents(&tile, w);
                 next.append(gpa, tile) catch o.free(&tile);
@@ -820,12 +848,10 @@ pub const Overview = struct {
         label.setEllipsize(.end);
         label.as(gtk.Widget).setParent(w);
         // A tab on another computer says which, so it isn't taken for one on this computer.
-        const chip = gtk.Label.new(null);
-        var host_name: [128]u8 = undefined;
-        if (std.fmt.bufPrintSentinel(&host_name, "{s}", .{h.label}, 0)) |z| chip.setText(z.ptr) else |_| {}
+        // `fillChip` puts the host's icon and name in it.
+        const chip = gtk.Box.new(.horizontal, 4);
         chip.as(gtk.Widget).addCssClass("overview-host");
         chip.as(gtk.Widget).setCanTarget(0);
-        chip.setEllipsize(.end);
         chip.as(gtk.Widget).setVisible(@intFromBool(h.remote()));
         chip.as(gtk.Widget).setParent(w);
         const badges = gtk.Box.new(.horizontal, 5);
@@ -1008,7 +1034,7 @@ pub const Overview = struct {
         }
         for (o.groups.items) |g| {
             place(g.card, g.rect[2], g.rect[3], g.rect[0], g.rect[1], 1);
-            placeUnder(g.label.as(gtk.Widget), g.rect);
+            placeUnder(g.label, g.rect);
         }
         // The ring goes around the panes themselves, a little off them, not around the tab's
         // whole place, which is larger by the margins the panes keep in the window.
@@ -1473,7 +1499,7 @@ pub const Overview = struct {
             o.drawAt(sn, host, .left, left + 8, top + 8);
         }
         for (o.groups.items) |g| {
-            const name = g.label.as(gtk.Widget);
+            const name = g.label;
             if (!o.animating) {
                 w.snapshotChild(name, sn);
                 continue;
