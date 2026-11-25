@@ -254,7 +254,6 @@ const css =
     \\.overview-dot.done { background-color: #4cc76a; }
     \\.overview-host { background-color: alpha(black, 0.38); border-radius: 99px; padding: 1px 9px; font-size: 0.75em; font-weight: 600; color: alpha(white, 0.82); }
     \\.overview-group { background-color: alpha(@window_fg_color, 0.05); border-radius: 14px; box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.07); }
-    \\.overview-hint { font-size: 0.8em; color: alpha(@window_fg_color, 0.5); text-shadow: 0 1px 3px alpha(@renux_shell, 0.6); }
     \\.overview-blank { background-color: alpha(@view_bg_color, 0.7); border-radius: 6px; box-shadow: inset 0 0 0 1px @renux_stroke_subtle; }
     \\.overview-ring { border: 2px solid @accent_bg_color; border-radius: 8px; }
     \\.overview-button { padding: 4px 16px; font-size: 0.9em; }
@@ -263,8 +262,7 @@ const css =
     \\window.renux.bare.sidebar-end .renux-sidebar { margin-right: 0; margin-left: 8px; }
     \\window.renux.bare.tight .renux-sidebar { border-radius: 0; border: none; margin-right: 1px; }
     \\window.renux.bare.tight.sidebar-end .renux-sidebar { margin-right: 0; margin-left: 1px; }
-    \\window.renux.bare .overview-name, window.renux.bare .overview-hint { background-color: @popover_bg_color; border-radius: 99px; padding: 2px 10px; text-shadow: none; box-shadow: 0 1px 6px alpha(black, 0.25); }
-    \\window.renux.bare .overview-hint { color: alpha(@window_fg_color, 0.7); }
+    \\window.renux.bare .overview-name { background-color: @popover_bg_color; border-radius: 99px; padding: 2px 10px; text-shadow: none; box-shadow: 0 1px 6px alpha(black, 0.25); }
     \\window.renux.bare .overview-session { background-color: @window_fg_color; color: @popover_bg_color; }
     \\window.renux.bare .overview-group { background: none; box-shadow: none; }
     \\window.renux.bare .overview-button { background-color: @popover_bg_color; box-shadow: 0 1px 6px alpha(black, 0.25); }

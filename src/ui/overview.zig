@@ -124,7 +124,7 @@ const Tile = struct {
     sharp: ?*gdk.Texture = null,
 };
 
-/// The tabs of one session, shown together with the session's name while tabs are grouped.
+/// The tabs of one session or one host, shown together with its name while tabs are grouped.
 const Group = struct {
     /// Its tabs: `count` of them in `tiles`, from `first`.
     first: usize,
@@ -152,11 +152,11 @@ pub const Overview = struct {
     app: *app_mod.App,
     area: *Area,
     ring: *gtk.Widget,
-    /// Groups the tabs by session, or not; the keys the overview answers to, said once.
-    group_button: *gtk.ToggleButton,
-    hint: *gtk.Label,
+    /// Group the tabs by session or by host, or not, in the order of `settings.Grouping`
+    /// after none.
+    group_buttons: [2]*gtk.ToggleButton,
     tiles: std.ArrayList(Tile) = .empty,
-    /// One for each session while tabs are grouped by session, none otherwise.
+    /// One for each session or host while tabs are grouped, none otherwise.
     groups: std.ArrayList(Group) = .empty,
     awaited: ?Awaited = null,
     /// Tabs that have closed, fading out of the grid.
@@ -214,18 +214,18 @@ pub const Overview = struct {
         ring.as(gtk.Widget).addCssClass("overview-ring");
         ring.as(gtk.Widget).setCanTarget(0);
         ring.as(gtk.Widget).setParent(w);
-        const group_button = gtk.ToggleButton.newWithLabel("By session");
-        group_button.as(gtk.Widget).addCssClass("pill");
-        group_button.as(gtk.Widget).addCssClass("overview-button");
-        group_button.as(gtk.Widget).setFocusable(0);
-        group_button.setActive(@intFromBool(settings.current.overview_by_session));
-        group_button.as(gtk.Widget).setParent(w);
-        const hint = gtk.Label.new("Enter  open     X  close     C  new tab     S  by session");
-        hint.as(gtk.Widget).addCssClass("overview-hint");
-        hint.as(gtk.Widget).setCanTarget(0);
-        hint.as(gtk.Widget).setParent(w);
-        o.* = .{ .app = a, .area = area, .ring = ring.as(gtk.Widget), .group_button = group_button, .hint = hint };
-        _ = gtk.ToggleButton.signals.toggled.connect(group_button, *Overview, &groupToggled, o, .{});
+        var group_buttons: [2]*gtk.ToggleButton = undefined;
+        for (&group_buttons, [_][:0]const u8{ "By session", "By host" }, [_]settings.Grouping{ .session, .host }) |*slot, name, grouping| {
+            const button = gtk.ToggleButton.newWithLabel(name.ptr);
+            button.as(gtk.Widget).addCssClass("pill");
+            button.as(gtk.Widget).addCssClass("overview-button");
+            button.as(gtk.Widget).setFocusable(0);
+            button.setActive(@intFromBool(settings.current.overview_grouping == grouping));
+            button.as(gtk.Widget).setParent(w);
+            slot.* = button;
+        }
+        o.* = .{ .app = a, .area = area, .ring = ring.as(gtk.Widget), .group_buttons = group_buttons };
+        for (group_buttons) |button| _ = gtk.ToggleButton.signals.toggled.connect(button, *Overview, &groupToggled, o, .{});
         area.overview = o;
         current = o;
         workspace_mod.previewed = &previewShows;
@@ -419,7 +419,12 @@ pub const Overview = struct {
             0xfe20 => o.cycle(-1), // Shift+Tab
             'x' => o.closeSelected(),
             'c' => o.newTab(),
-            's' => o.setGrouped(!settings.current.overview_by_session),
+            // None, by session, by host, and round again.
+            's' => o.setGrouping(switch (settings.current.overview_grouping) {
+                .none => .session,
+                .session => .host,
+                .host => .none,
+            }),
             else => return false,
         }
         return true;
@@ -542,37 +547,48 @@ pub const Overview = struct {
         return moving;
     }
 
+    /// A button going on groups the tabs its way; the one in use going off ungroups them.
     fn groupToggled(button: *gtk.ToggleButton, o: *Overview) callconv(.c) void {
-        o.setGrouped(button.getActive() != 0);
+        const i = std.mem.indexOfScalar(*gtk.ToggleButton, &o.group_buttons, button) orelse return;
+        const grouping: settings.Grouping = @fromBackingInt(@intCast(i + 1));
+        if (button.getActive() != 0) {
+            o.setGrouping(grouping);
+        } else if (settings.current.overview_grouping == grouping) {
+            o.setGrouping(.none);
+        }
     }
 
-    /// Shows the tabs one by one, or together by session, each session under its name.
-    fn setGrouped(o: *Overview, on: bool) void {
-        if (settings.current.overview_by_session != on) {
-            settings.current.overview_by_session = on;
+    /// Shows the tabs one by one, or together by session or by host, each group under its name.
+    fn setGrouping(o: *Overview, grouping: settings.Grouping) void {
+        const differs = settings.current.overview_grouping != grouping;
+        if (differs) {
+            settings.current.overview_grouping = grouping;
             settings.save();
         }
-        // Setting the button runs `groupToggled`, which comes back here with nothing to save.
-        if ((o.group_button.getActive() != 0) != on) return o.group_button.setActive(@intFromBool(on));
-        if (!o.open) return;
+        // Setting a button runs `groupToggled`, which comes back here with nothing to change.
+        for (o.group_buttons, 1..) |button, i| button.setActive(@intFromBool(@backingInt(grouping) == i));
+        if (!differs or !o.open) return;
         // The tabs' names change with the grouping, and the tabs glide to their new places.
         o.sync();
         o.startGlide();
     }
 
-    /// Makes the groups match the tabs: one for each session, in order, while grouping is on.
+    /// Makes the groups match the tabs: one for each session or host, in order, while grouping
+    /// is on. The tabs come host by host and session by session, so each group's are together.
     fn regroup(o: *Overview) void {
         for (o.groups.items) |g| {
             g.card.unparent();
             g.label.as(gtk.Widget).unparent();
         }
         o.groups.clearRetainingCapacity();
-        if (!settings.current.overview_by_session) return;
+        const grouping = settings.current.overview_grouping;
+        if (grouping == .none) return;
         var i: usize = 0;
         while (i < o.tiles.items.len) {
             const first = o.tiles.items[i];
             var j = i + 1;
-            while (j < o.tiles.items.len and o.tiles.items[j].host == first.host and std.mem.eql(u8, o.tiles.items[j].session_id, first.session_id)) j += 1;
+            while (j < o.tiles.items.len and o.tiles.items[j].host == first.host and
+                (grouping == .host or std.mem.eql(u8, o.tiles.items[j].session_id, first.session_id))) j += 1;
             const card = gtk.Box.new(.horizontal, 0);
             card.as(gtk.Widget).addCssClass("overview-group");
             card.as(gtk.Widget).setCanTarget(0);
@@ -586,10 +602,10 @@ pub const Overview = struct {
             label.as(gtk.Widget).setCanTarget(0);
             label.setEllipsize(.end);
             var name: [200]u8 = undefined;
-            const session = for (first.host.server.sessions.items) |se| {
+            const group_name = if (grouping == .host) first.host.label else for (first.host.server.sessions.items) |se| {
                 if (std.mem.eql(u8, se.id, first.session_id)) break se.label;
             } else "Session";
-            if (std.fmt.bufPrintSentinel(&name, "{s}", .{session}, 0)) |z| label.setText(z.ptr) else |_| {}
+            if (std.fmt.bufPrintSentinel(&name, "{s}", .{group_name}, 0)) |z| label.setText(z.ptr) else |_| {}
             label.as(gtk.Widget).setParent(o.widget());
             o.groups.append(gpa, .{ .first = i, .count = j - i, .card = card.as(gtk.Widget), .label = label }) catch {
                 card.as(gtk.Widget).unparent();
@@ -721,7 +737,7 @@ pub const Overview = struct {
         const had_focus = if (o.focus < o.tiles.items.len) o.tiles.items[o.focus].label else null;
         var next: std.ArrayList(Tile) = .empty;
         var differs = false;
-        const grouped = settings.current.overview_by_session;
+        const grouping = settings.current.overview_grouping;
         for (a.hosts.items) |h| for (h.server.sessions.items) |*session| {
             const v = h.server.sessionView(session.id) orelse continue;
             for (v.windows) |*w| {
@@ -738,12 +754,14 @@ pub const Overview = struct {
                 var name: [300]u8 = undefined;
                 var tab: [256]u8 = undefined;
                 const tab_name = app_mod.windowLabel(h, &tab, w, v);
-                // Grouped, a tab is under its session's name already and says only its own.
-                const text = if (grouped)
+                // Grouped by session, a tab is under its session's name already and says only its own.
+                const text = if (grouping == .session)
                     std.fmt.bufPrintSentinel(&name, "{s}", .{tab_name}, 0) catch "Tab"
                 else
                     std.fmt.bufPrintSentinel(&name, "{s} · {s}", .{ session.label, tab_name }, 0) catch "Tab";
                 tile.label.setText(text.ptr);
+                // Grouped by host, the group's name says which computer; the chip would repeat it.
+                tile.host_chip.as(gtk.Widget).setVisible(@intFromBool(h.remote() and grouping != .host));
                 o.markAgents(&tile, w);
                 next.append(gpa, tile) catch o.free(&tile);
             }
@@ -943,7 +961,7 @@ pub const Overview = struct {
     }
 
     /// Gives every child its place: the previews, the plain cards, names and dots, the
-    /// sessions' cards, the ring, and the buttons and keys at the foot.
+    /// sessions' cards, the ring, and the buttons at the foot.
     fn layout(o: *Overview) void {
         const n = o.tiles.items.len;
         const full_w = o.size[0];
@@ -1003,21 +1021,20 @@ pub const Overview = struct {
         }
         o.ring_at = .{ home[0] + o.ring_off[0], home[1] + o.ring_off[1] };
         place(o.ring, @round(sel[2]) + 2 * ring_gap, @round(sel[3]) + 2 * ring_gap, o.ring_at[0], o.ring_at[1], 1);
-        // The button in the middle of the foot, the keys at its right end.
-        const buttons = [_]*gtk.Widget{o.group_button.as(gtk.Widget)};
-        var sizes: [1][2]f64 = undefined;
+        // The buttons in the middle of the foot.
+        const buttons = [_]*gtk.Widget{ o.group_buttons[0].as(gtk.Widget), o.group_buttons[1].as(gtk.Widget) };
+        var sizes: [buttons.len][2]f64 = undefined;
         var row_w: f64 = 0;
         for (buttons, 0..) |b, i| {
             sizes[i] = natural(b);
             row_w += sizes[i][0];
         }
+        row_w += 8 * @as(f64, buttons.len - 1);
         var x = @round((full_w - row_w) / 2);
         for (buttons, 0..) |b, i| {
             place(b, sizes[i][0], sizes[i][1], x, @round(full_h - sizes[i][1] - 16), 1);
             x += sizes[i][0] + 8;
         }
-        const hint = natural(o.hint.as(gtk.Widget));
-        place(o.hint.as(gtk.Widget), hint[0], hint[1], @round(full_w - hint[0] - 22), @round(full_h - hint[1] - 22), 1);
     }
 
     /// The part of the grid on screen now: the focus tab's place when zoomed in, all of it
@@ -1466,7 +1483,7 @@ pub const Overview = struct {
         // The foot comes up from below as it appears.
         sn.save();
         sn.translate(&.{ .f_x = 0, .f_y = @floatCast(foot_rise * (1 - smooth(out))) });
-        inline for (.{ o.group_button.as(gtk.Widget), o.hint.as(gtk.Widget) }) |foot| w.snapshotChild(foot, sn);
+        for (o.group_buttons) |foot| w.snapshotChild(foot.as(gtk.Widget), sn);
         sn.restore();
         sn.pop();
     }
