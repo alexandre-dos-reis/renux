@@ -40,7 +40,8 @@ const Card = struct {
     moved: bool = false,
     /// When its status last changed, to put the latest first.
     since_us: i64 = 0,
-    /// Where its session comes in the sidebar's order, and the session's name.
+    /// Where its host and its session come in the sidebar's order, and the session's name.
+    host_rank: usize = 0,
     session_rank: usize = 0,
     session_label: [96]u8 = undefined,
     session_label_len: usize = 0,
@@ -63,6 +64,8 @@ pub const Board = struct {
     lists: [4]*gtk.Box = undefined,
     counts: [4]*gtk.Label = undefined,
     heading: *gtk.Widget = undefined,
+    /// All, By Session and By Host, in the order of `settings.Grouping`.
+    group_buttons: [3]*gtk.ToggleButton = undefined,
     empties: [4]*gtk.Widget = undefined,
     /// What each column's list holds now, as a hash of its rows in order, so a list is only
     /// laid out again when its rows or their order change.
@@ -93,18 +96,19 @@ pub const Board = struct {
         title.as(gtk.Widget).setHexpand(1);
         head.append(title.as(gtk.Widget));
         b.heading = title.as(gtk.Widget);
-        // All cards in one run per column, or under the name of the session each is in.
+        // All cards in one run per column, or under the name of the session or host each is in.
         const by = gtk.Box.new(.horizontal, 0);
         by.as(gtk.Widget).addCssClass("linked");
         by.as(gtk.Widget).addCssClass("board-grouping");
         by.as(gtk.Widget).setValign(.center);
-        const all = gtk.ToggleButton.newWithLabel("All");
-        const by_session = gtk.ToggleButton.newWithLabel("By Session");
-        by_session.setGroup(all);
-        (if (settings.current.board_by_session) by_session else all).setActive(1);
-        by.append(all.as(gtk.Widget));
-        by.append(by_session.as(gtk.Widget));
-        _ = gtk.ToggleButton.signals.toggled.connect(by_session, *Board, &groupingToggled, b, .{});
+        for (&b.group_buttons, [_][:0]const u8{ "All", "By Session", "By Host" }, 0..) |*slot, name, i| {
+            const button = gtk.ToggleButton.newWithLabel(name.ptr);
+            if (i > 0) button.setGroup(b.group_buttons[0]);
+            if (i == @backingInt(settings.current.board_grouping)) button.setActive(1);
+            by.append(button.as(gtk.Widget));
+            _ = gtk.ToggleButton.signals.toggled.connect(button, *Board, &groupingToggled, b, .{});
+            slot.* = button;
+        }
         head.append(by.as(gtk.Widget));
         const close = icons.button(.close, "Back to the panes", null);
         _ = gtk.Button.signals.clicked.connect(close, *Board, &closeClicked, b, .{});
@@ -288,10 +292,13 @@ pub const Board = struct {
         }
     }
 
+    /// One of the grouping buttons went on or off; only the one going on says anything.
     fn groupingToggled(button: *gtk.ToggleButton, b: *Board) callconv(.c) void {
-        const on = button.getActive() != 0;
-        if (on == settings.current.board_by_session) return;
-        settings.current.board_by_session = on;
+        if (button.getActive() == 0) return;
+        const i = std.mem.indexOfScalar(*gtk.ToggleButton, &b.group_buttons, button) orelse return;
+        const grouping: settings.Grouping = @fromBackingInt(@intCast(i));
+        if (grouping == settings.current.board_grouping) return;
+        settings.current.board_grouping = grouping;
         settings.save();
         b.refresh();
     }
@@ -329,7 +336,7 @@ pub const Board = struct {
     pub fn refresh(b: *Board) void {
         for (b.cards.items) |c| c.seen = false;
         var rank: usize = 0;
-        for (b.app.hosts.items) |h| {
+        for (b.app.hosts.items, 1..) |h, host_rank| {
             const s = h.server;
             for (s.sessions.items) |session| {
                 rank += 1;
@@ -342,6 +349,7 @@ pub const Board = struct {
                     if (!info.has_status and !programs.isAgent(info.program)) continue;
                     const c = b.cardFor(h, session.id, w.id, blk.id) orelse continue;
                     c.seen = true;
+                    c.host_rank = host_rank;
                     c.session_rank = rank;
                     b.fill(c, if (session.label.len > 0) session.label else "session");
                 };
@@ -494,7 +502,7 @@ pub const Board = struct {
 
         const folder: ?[]const u8 = if (info) |i| (if (i.folder) |f| programs.shortFolder(&buf, f) else null) else null;
         // Under its session's name a card only says where in it; otherwise the session too.
-        const where = if (settings.current.board_by_session)
+        const where = if (settings.current.board_grouping == .session)
             zt(&zbuf, folder orelse "")
         else if (folder) |f|
             std.fmt.bufPrintSentinel(&zbuf, "{s} · {s}", .{ session_label, f }, 0) catch ""
@@ -532,13 +540,27 @@ pub const Board = struct {
     }
 
     /// Puts each column's cards in order: the latest change first, and with grouping on,
-    /// under the name of the session each is in, sessions in the sidebar's order. A column
+    /// under the name of the session or host each is in, in the sidebar's order. A column
     /// whose rows are already right is left alone, so nothing under the pointer flickers.
     fn layout(b: *Board) void {
-        const grouped = settings.current.board_by_session;
+        const grouping = settings.current.board_grouping;
         const Order = struct {
-            fn before(by_session: bool, x: *Card, y: *Card) bool {
-                if (by_session and x.session_rank != y.session_rank) return x.session_rank < y.session_rank;
+            fn rank(g: settings.Grouping, c: *const Card) usize {
+                return switch (g) {
+                    .none => 0,
+                    .session => c.session_rank,
+                    .host => c.host_rank,
+                };
+            }
+            fn groupName(g: settings.Grouping, c: *const Card) []const u8 {
+                return switch (g) {
+                    .none => "",
+                    .session => c.session_label[0..c.session_label_len],
+                    .host => c.host.label,
+                };
+            }
+            fn before(g: settings.Grouping, x: *Card, y: *Card) bool {
+                if (rank(g, x) != rank(g, y)) return rank(g, x) < rank(g, y);
                 if (x.since_us != y.since_us) return x.since_us > y.since_us;
                 return @intFromPtr(x) < @intFromPtr(y);
             }
@@ -550,11 +572,11 @@ pub const Board = struct {
             for (b.cards.items) |c| if (c.column) |col| {
                 if (@backingInt(col) == k) sorted.append(gpa, c) catch {};
             };
-            std.mem.sort(*Card, sorted.items, grouped, Order.before);
-            var hasher = std.hash.Wyhash.init(@intFromBool(grouped));
+            std.mem.sort(*Card, sorted.items, grouping, Order.before);
+            var hasher = std.hash.Wyhash.init(@backingInt(grouping));
             for (sorted.items) |c| {
                 hasher.update(std.mem.asBytes(&c));
-                if (grouped) hasher.update(c.session_label[0..c.session_label_len]);
+                hasher.update(Order.groupName(grouping, c));
             }
             const sig = hasher.final() | 1;
             const list = b.lists[k];
@@ -563,10 +585,10 @@ pub const Board = struct {
                 while (list.as(gtk.Widget).getFirstChild()) |child| list.remove(child);
                 var last_rank: usize = 0;
                 for (sorted.items) |c| {
-                    if (grouped and c.session_rank != last_rank) {
-                        last_rank = c.session_rank;
+                    if (grouping != .none and Order.rank(grouping, c) != last_rank) {
+                        last_rank = Order.rank(grouping, c);
                         var zbuf: [97]u8 = undefined;
-                        const name = gtk.Label.new(zt(&zbuf, c.session_label[0..c.session_label_len]).ptr);
+                        const name = gtk.Label.new(zt(&zbuf, Order.groupName(grouping, c)).ptr);
                         name.setXalign(0);
                         name.setEllipsize(.end);
                         name.as(gtk.Widget).addCssClass("board-session");

@@ -109,7 +109,7 @@ Developer. The overview is in the command palette too, and has a button at the f
 sidebar.
 In the overview, the arrow keys or `h` `j` `k` `l` move between tabs, Enter goes to one and
 Escape goes back. `x` closes the tab the ring is on, `c` opens a new tab in its session and
-goes to it, and `s` groups the tabs by session.
+goes to it, and `s` groups the tabs by session, then by host, then not at all.
 
 The command palette also offers **Mute or unmute tab**, **Switch host**, **Remove host…**,
 and **Refresh sessions**, plus clipboard and pane-management commands. Muting silences a

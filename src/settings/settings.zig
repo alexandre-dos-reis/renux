@@ -13,6 +13,9 @@ pub const CursorStyle = enum { program, block, bar, underline };
 pub const TabPosition = enum { left, right, above };
 pub const BoldItalic = enum { fonts, plain };
 pub const PaddingColor = enum { terminal, theme };
+/// How the overview and the agent board gather their tabs and cards: not at all, under each
+/// session's name, or under each host's.
+pub const Grouping = enum { none, session, host };
 
 pub const Host = struct { label: []u8, url: []u8 };
 
@@ -98,8 +101,8 @@ pub const Settings = struct {
     remote_links_here: bool = true,
     /// What opens a file named in a pane, typed at a shell: `{path}` and `{line}` are filled in.
     editor_command: []u8,
-    /// The overview shows each session's tabs together under its name.
-    overview_by_session: bool = false,
+    /// The overview shows tabs together under their session's name, or their host's.
+    overview_grouping: Grouping = .none,
     /// The close, minimize and maximize buttons in the window's top left corner are shown.
     window_buttons: bool = true,
     /// A pane's frame takes its program's background color.
@@ -123,8 +126,8 @@ pub const Settings = struct {
     /// Colors 16 to 255 made from the theme's own 16, so they match it.
     extended_palette: bool = false,
     copy_animation: bool = true,
-    /// The agent board lists each column's cards under their sessions' names.
-    board_by_session: bool = false,
+    /// The agent board lists each column's cards under their sessions' names, or their hosts'.
+    board_grouping: Grouping = .none,
     agent_board: bool = false,
     /// Ask the desktop to prevent suspend and idle sleep while a pane reports working.
     keep_awake_while_working: bool = false,
@@ -523,7 +526,21 @@ pub fn load() void {
     if (base) |old| old.unref();
     base = toKeyFile(&current) catch null;
     dirty = false;
+    adoptOldGrouping(kf);
     migrateOldServer();
+}
+
+/// Grouping was once a switch for sessions alone. Someone who had it on keeps it, written
+/// under the new key on the next save.
+fn adoptOldGrouping(kf: *glib.KeyFile) void {
+    inline for (.{ .{ "overview_grouping", "overview-by-session" }, .{ "board_grouping", "board-by-session" } }) |p| {
+        if (kf.getString("renux", comptime keyOf(p[0]), null)) |set| {
+            glib.free(set);
+        } else if (boolean(kf, p[1], false)) {
+            @field(current, p[0]) = .session;
+            save();
+        }
+    }
 }
 
 fn appendShortcut(keys: []const u8, action: []const u8, args: []const u8) void {
@@ -849,6 +866,18 @@ test "a save keeps what another window wrote, unknown keys and comments" {
     try std.testing.expect(std.mem.indexOf(u8, text, "labels=box;") != null);
     // What this window didn't change isn't written at all.
     try std.testing.expect(std.mem.indexOf(u8, text, "font=") == null);
+}
+
+test "grouping by session from before By host is kept, and a newer choice wins" {
+    const root = try testFolder("[renux]\noverview-by-session=true\nboard-by-session=true\nboard-grouping=host\n");
+    defer removeTestFolder(root);
+    load();
+    try std.testing.expectEqual(Grouping.session, current.overview_grouping);
+    try std.testing.expectEqual(Grouping.host, current.board_grouping);
+    flush();
+    const text = try readTestFile();
+    defer gpa.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "overview-grouping=session") != null);
 }
 
 test "a settings file that can't be read is left alone" {
